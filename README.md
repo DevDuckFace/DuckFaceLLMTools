@@ -1,5 +1,5 @@
 # DuckFaceLLM
-
+![image alt](https://github.com/DevDuckFace/DuckFaceLLMTools/blob/490c83d5116f35eb0fec349f04af9cdcc961d6c7/Screenshot_5.png)
 A C++ desktop GUI app that runs local LLMs through a bundled **llama.cpp**
 server. Features:
 
