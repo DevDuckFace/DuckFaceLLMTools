@@ -1,0 +1,6 @@
+// Embeds app_icon.ico into the DFFastLLM.exe binary itself. Because the
+// icon lives inside the executable's resources, Windows automatically uses
+// it everywhere: taskbar, Alt+Tab, the .exe file icon in Explorer, and any
+// shortcut (desktop, Start Menu) created by the installer that points to
+// this .exe — no separate icon file needs to be shipped or referenced.
+IDI_APP_ICON ICON "app_icon.ico"
