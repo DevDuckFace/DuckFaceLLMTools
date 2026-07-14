@@ -272,8 +272,4 @@ wins.
   executable. It is not encrypted — treat that file as sensitive.
 - **GPU offload**: `LlamaServerManager.cpp` passes `-ngl 999` to push as many
   layers as possible onto the GPU. Ignored automatically on CPU-only builds.
-- **No console window**: the executable is built with the Windows GUI
-  subsystem (`WIN32` in CMake + `/ENTRY:mainCRTStartup`), and the
-  `llama-server.exe` child process is started with `CREATE_NO_WINDOW`. If you
-  still see a console appear, double check you rebuilt after pulling this
-  version of `CMakeLists.txt`.
+
