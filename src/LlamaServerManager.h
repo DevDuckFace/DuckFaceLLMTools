@@ -10,6 +10,10 @@ public:
     bool Start(const std::string& modelPath, int port = 8080, int ctxSize = 4096,
                int gpuLayers = 999, const std::string& mmprojPath = "",
                const std::string& extraArgs = "");
+
+    // Inicia o bin\whisper-server.exe (whisper.cpp) para transcricao de
+    // voz. Mesmo gerenciamento de processo/log do llama-server.
+    bool StartWhisper(const std::string& modelPath, int port = 8090);
     void Stop();
     bool IsRunning() const;
 

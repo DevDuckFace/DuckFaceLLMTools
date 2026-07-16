@@ -241,6 +241,378 @@ private:
             {Language::ES, "Esta es una plantilla integrada: guardar crea una copia editable y oculta la original (restaurable después)."},
             {Language::ZH, "这是内置模板：保存会创建可编辑副本并隐藏原始模板（之后可恢复）。"}
         }},
+        {"tab_voice", {
+            {Language::EN, "Voice"}, {Language::PT_BR, "Voz"},
+            {Language::ES, "Voz"}, {Language::ZH, "语音"}
+        }},
+        {"mic_start_tooltip", {
+            {Language::EN, "Speak instead of typing: click, talk, click again to stop. The transcription is added to the message box."},
+            {Language::PT_BR, "Fale em vez de digitar: clique, fale e clique de novo para parar. A transcrição é adicionada ao campo de mensagem."},
+            {Language::ES, "Habla en lugar de escribir: haz clic, habla y haz clic de nuevo para parar. La transcripción se añade al campo de mensaje."},
+            {Language::ZH, "用说话代替打字：点击开始说话，再次点击停止。转录文本会添加到消息框。"}
+        }},
+        {"mic_stop_tooltip", {
+            {Language::EN, "Recording... click to stop and transcribe."},
+            {Language::PT_BR, "Gravando... clique para parar e transcrever."},
+            {Language::ES, "Grabando... haz clic para parar y transcribir."},
+            {Language::ZH, "录音中……点击停止并转录。"}
+        }},
+        {"mic_transcribing", {
+            {Language::EN, "Transcribing..."}, {Language::PT_BR, "Transcrevendo..."},
+            {Language::ES, "Transcribiendo..."}, {Language::ZH, "转录中……"}
+        }},
+        {"mic_needs_whisper", {
+            {Language::EN, "Start the Whisper server in the Voice tab first (it does the transcription)."},
+            {Language::PT_BR, "Inicie primeiro o servidor Whisper na aba Voz (é ele que faz a transcrição)."},
+            {Language::ES, "Inicia primero el servidor Whisper en la pestaña Voz (es el que hace la transcripción)."},
+            {Language::ZH, "请先在“语音”选项卡中启动 Whisper 服务器（由它进行转录）。"}
+        }},
+        {"mic_open_failed", {
+            {Language::EN, "Could not open the microphone. Check that one is connected and allowed in Windows privacy settings."},
+            {Language::PT_BR, "Não foi possível abrir o microfone. Verifique se há um conectado e permitido nas configurações de privacidade do Windows."},
+            {Language::ES, "No se pudo abrir el micrófono. Verifica que haya uno conectado y permitido en la configuración de privacidad de Windows."},
+            {Language::ZH, "无法打开麦克风。请检查是否已连接并在 Windows 隐私设置中允许使用。"}
+        }},
+        {"voice_download_title", {
+            {Language::EN, "Download a voice recognition model (all are multilingual: PT, EN, ES, ZH and ~95 more):"},
+            {Language::PT_BR, "Baixar um modelo de reconhecimento de voz (todos são multilíngues: PT, EN, ES, ZH e mais ~95):"},
+            {Language::ES, "Descargar un modelo de reconocimiento de voz (todos son multilingües: PT, EN, ES, ZH y ~95 más):"},
+            {Language::ZH, "下载语音识别模型（全部为多语言：中、英、葡、西等约 99 种）："}
+        }},
+        {"voice_downloaded_suffix", {
+            {Language::EN, "[downloaded]"}, {Language::PT_BR, "[baixado]"},
+            {Language::ES, "[descargado]"}, {Language::ZH, "[已下载]"}
+        }},
+        {"voice_use_downloaded", {
+            {Language::EN, "Use downloaded model"}, {Language::PT_BR, "Usar modelo baixado"},
+            {Language::ES, "Usar modelo descargado"}, {Language::ZH, "使用已下载的模型"}
+        }},
+        {"voice_download_button", {
+            {Language::EN, "Download to models\\"}, {Language::PT_BR, "Baixar para models\\"},
+            {Language::ES, "Descargar a models\\"}, {Language::ZH, "下载到 models\\"}
+        }},
+        {"voice_download_hint", {
+            {Language::EN, "Downloads come from the official ggerganov/whisper.cpp repository on Hugging Face, with resume support. When it finishes, the model path below is filled in automatically. Already have the file? Use Browse."},
+            {Language::PT_BR, "Os downloads vêm do repositório oficial ggerganov/whisper.cpp no Hugging Face, com retomada. Ao terminar, o caminho do modelo abaixo é preenchido automaticamente. Já tem o arquivo? Use Procurar."},
+            {Language::ES, "Las descargas vienen del repositorio oficial ggerganov/whisper.cpp en Hugging Face, con reanudación. Al terminar, la ruta del modelo se rellena automáticamente. ¿Ya tienes el archivo? Usa Buscar."},
+            {Language::ZH, "下载来自 Hugging Face 上的官方 ggerganov/whisper.cpp 仓库，支持断点续传。完成后会自动填写下方的模型路径。已有文件？请使用浏览。"}
+        }},
+        {"voice_q_fastest", {
+            {Language::EN, "fastest, lowest accuracy"}, {Language::PT_BR, "o mais rápido, menor precisão"},
+            {Language::ES, "el más rápido, menor precisión"}, {Language::ZH, "最快，精度最低"}
+        }},
+        {"voice_q_fast", {
+            {Language::EN, "fast, basic accuracy"}, {Language::PT_BR, "rápido, precisão básica"},
+            {Language::ES, "rápido, precisión básica"}, {Language::ZH, "快速，基础精度"}
+        }},
+        {"voice_q_balanced", {
+            {Language::EN, "small quantized: light and good"}, {Language::PT_BR, "small quantizado: leve e bom"},
+            {Language::ES, "small cuantizado: ligero y bueno"}, {Language::ZH, "small 量化版：轻巧且好用"}
+        }},
+        {"voice_q_recommended", {
+            {Language::EN, "recommended (good balance)"}, {Language::PT_BR, "recomendado (bom equilíbrio)"},
+            {Language::ES, "recomendado (buen equilibrio)"}, {Language::ZH, "推荐（均衡之选）"}
+        }},
+        {"voice_q_accurate", {
+            {Language::EN, "high accuracy, slower"}, {Language::PT_BR, "alta precisão, mais lento"},
+            {Language::ES, "alta precisión, más lento"}, {Language::ZH, "高精度，较慢"}
+        }},
+        {"voice_q_turbo_q", {
+            {Language::EN, "large-v3-turbo quantized: fast AND accurate"}, {Language::PT_BR, "large-v3-turbo quantizado: rápido E preciso"},
+            {Language::ES, "large-v3-turbo cuantizado: rápido Y preciso"}, {Language::ZH, "large-v3-turbo 量化版：又快又准"}
+        }},
+        {"voice_q_turbo", {
+            {Language::EN, "large-v3-turbo: fast AND accurate"}, {Language::PT_BR, "large-v3-turbo: rápido E preciso"},
+            {Language::ES, "large-v3-turbo: rápido Y preciso"}, {Language::ZH, "large-v3-turbo：又快又准"}
+        }},
+        {"voice_q_best", {
+            {Language::EN, "maximum accuracy, heavy"}, {Language::PT_BR, "precisão máxima, pesado"},
+            {Language::ES, "precisión máxima, pesado"}, {Language::ZH, "精度最高，较重"}
+        }},
+        {"tray_minimize_option", {
+            {Language::EN, "Minimize to system tray (next to the clock)"},
+            {Language::PT_BR, "Minimizar para a bandeja do sistema (ao lado do relógio)"},
+            {Language::ES, "Minimizar a la bandeja del sistema (junto al reloj)"},
+            {Language::ZH, "最小化到系统托盘（时钟旁）"}
+        }},
+        {"tray_close_option", {
+            {Language::EN, "Closing hides to the tray instead of quitting"},
+            {Language::PT_BR, "Fechar esconde para a bandeja em vez de sair"},
+            {Language::ES, "Cerrar oculta a la bandeja en vez de salir"},
+            {Language::ZH, "关闭时隐藏到托盘而不是退出"}
+        }},
+        {"tray_hint", {
+            {Language::EN, "In the tray the app keeps running: servers, the voice conversation and the global push-to-talk key stay active. Right-click the tray icon to restore or quit."},
+            {Language::PT_BR, "Na bandeja o app continua rodando: servidores, a conversa por voz e a tecla global de falar seguem ativos. Clique com o botão direito no ícone da bandeja para restaurar ou sair."},
+            {Language::ES, "En la bandeja la app sigue funcionando: los servidores, la conversación por voz y la tecla global siguen activos. Clic derecho en el icono de la bandeja para restaurar o salir."},
+            {Language::ZH, "在托盘中应用继续运行：服务器、语音对话和全局按键仍然有效。右键点击托盘图标可恢复或退出。"}
+        }},
+        {"tray_restore", {
+            {Language::EN, "Restore"}, {Language::PT_BR, "Restaurar"},
+            {Language::ES, "Restaurar"}, {Language::ZH, "恢复"}
+        }},
+        {"tray_quit", {
+            {Language::EN, "Quit"}, {Language::PT_BR, "Sair"},
+            {Language::ES, "Salir"}, {Language::ZH, "退出"}
+        }},
+        {"voice_folder_label", {
+            {Language::EN, "Working folder (files by voice):"},
+            {Language::PT_BR, "Pasta de trabalho (arquivos por voz):"},
+            {Language::ES, "Carpeta de trabajo (archivos por voz):"},
+            {Language::ZH, "工作文件夹（语音文件操作）："}
+        }},
+        {"voice_folder_clear", {
+            {Language::EN, "Remove"}, {Language::PT_BR, "Remover"},
+            {Language::ES, "Quitar"}, {Language::ZH, "移除"}
+        }},
+        {"voice_folder_hint", {
+            {Language::EN, "With a folder set you can ask by voice to create notes, lists and files — the model can create, edit, read, delete and list files ONLY inside this folder (same sandbox as the Agent)."},
+            {Language::PT_BR, "Com uma pasta definida você pode pedir por voz para criar notas, listas e arquivos — o modelo pode criar, editar, ler, apagar e listar arquivos APENAS dentro desta pasta (mesmo sandbox do Agente)."},
+            {Language::ES, "Con una carpeta definida puedes pedir por voz crear notas, listas y archivos — el modelo puede crear, editar, leer, borrar y listar archivos SOLO dentro de esta carpeta (mismo sandbox del Agente)."},
+            {Language::ZH, "设置文件夹后，您可以通过语音创建笔记、清单和文件——模型只能在此文件夹内创建、编辑、读取、删除和列出文件（与代理相同的沙盒）。"}
+        }},
+        {"voice_wake_checkbox", {
+            {Language::EN, "Only respond when called by name"},
+            {Language::PT_BR, "Só responder ao ser chamado pelo nome"},
+            {Language::ES, "Solo responder al ser llamado por su nombre"},
+            {Language::ZH, "仅在被叫到名字时回应（唤醒词）"}
+        }},
+        {"voice_wake_hint", {
+            {Language::EN, "Free mode only: speech that doesn't include this name is ignored (background conversations don't trigger answers). Accent-insensitive."},
+            {Language::PT_BR, "Só no modo livre: falas que não incluem esse nome são ignoradas (conversas de fundo não disparam respostas). Ignora acentos."},
+            {Language::ES, "Solo en modo libre: las frases que no incluyen este nombre se ignoran (las conversaciones de fondo no disparan respuestas). Ignora acentos."},
+            {Language::ZH, "仅限自由模式：不包含此名字的语音将被忽略（背景对话不会触发回答）。不区分重音符号。"}
+        }},
+        {"voice_web_search_tooltip", {
+            {Language::EN, "Before answering, search DuckDuckGo for what you said and give the results to the model. Source URLs aren't spoken, but are attached to the saved conversation in History."},
+            {Language::PT_BR, "Antes de responder, pesquisa no DuckDuckGo o que você falou e entrega os resultados ao modelo. As URLs das fontes não são faladas, mas ficam anexadas na conversa salva no Histórico."},
+            {Language::ES, "Antes de responder, busca en DuckDuckGo lo que dijiste y entrega los resultados al modelo. Las URLs de las fuentes no se hablan, pero quedan adjuntas a la conversación guardada en el Historial."},
+            {Language::ZH, "回答前，在 DuckDuckGo 搜索您所说的内容并提供给模型。来源网址不会朗读，但会附在历史记录保存的会话中。"}
+        }},
+        {"voice_tts_voice_label", {
+            {Language::EN, "Synthesizer voice:"}, {Language::PT_BR, "Voz do sintetizador:"},
+            {Language::ES, "Voz del sintetizador:"}, {Language::ZH, "合成器语音："}
+        }},
+        {"voice_tts_voice_hint", {
+            {Language::EN, "The list includes classic SAPI voices AND the more natural Windows 'OneCore' voices (e.g. Maria/Daniel in pt-BR). To get more voices: Windows Settings > Time & Language > Speech > Add voices. Voices marked 'Natural' in Windows 11 aren't exposed to desktop apps by Microsoft."},
+            {Language::PT_BR, "A lista inclui as vozes SAPI clássicas E as vozes 'OneCore' do Windows, mais naturais (ex: Maria/Daniel em pt-BR). Para mais vozes: Configurações do Windows > Hora e Idioma > Fala > Adicionar vozes. As vozes marcadas 'Natural' no Windows 11 não são disponibilizadas pela Microsoft para apps de desktop."},
+            {Language::ES, "La lista incluye las voces SAPI clásicas Y las voces 'OneCore' de Windows, más naturales. Para más voces: Configuración de Windows > Hora e idioma > Voz > Agregar voces. Las voces 'Natural' de Windows 11 no están disponibles para apps de escritorio."},
+            {Language::ZH, "列表包括经典 SAPI 语音和更自然的 Windows“OneCore”语音。要获取更多语音：Windows 设置 > 时间和语言 > 语音 > 添加语音。Windows 11 中标记为“自然”的语音微软未向桌面应用开放。"}
+        }},
+        {"voice_stop_word_label", {
+            {Language::EN, "Interrupt word (spoken while the model talks, cuts it off):"},
+            {Language::PT_BR, "Palavra de interrupção (dita enquanto o modelo fala, corta a fala):"},
+            {Language::ES, "Palabra de interrupción (dicha mientras el modelo habla, corta el habla):"},
+            {Language::ZH, "打断词（模型说话时说出即打断）："}
+        }},
+        {"voice_stop_word_hint", {
+            {Language::EN, "Free mode: say this word over the model's answer to stop it and be heard (e.g. 'stop'). What you say during the answer is transcribed and checked. Leave empty to interrupt by voice volume instead."},
+            {Language::PT_BR, "Modo livre: diga esta palavra por cima da resposta para pará-la e ser ouvido (ex: 'parar'). O que você fala durante a resposta é transcrito e verificado. Deixe vazio para interromper por volume de voz."},
+            {Language::ES, "Modo libre: di esta palabra sobre la respuesta para detenerla y ser escuchado (ej: 'parar'). Lo que dices durante la respuesta se transcribe y verifica. Déjalo vacío para interrumpir por volumen de voz."},
+            {Language::ZH, "自由模式：在模型回答时说出此词即可停止回答（如“停止”）。回答期间您说的话会被转录并检查。留空则按音量打断。"}
+        }},
+        {"voice_file_prompt", {
+            {Language::EN, "You can manage files in the user's working folder using EXACTLY these markers in your reply: <<write name.txt>> content <<end>> creates/overwrites; <<append name.txt>> content <<end>> appends; <<read name.txt>> reads it aloud; <<delete name.txt>> deletes; <<list>> lists files. Use them ONLY when the user asks for a file action, and keep the rest of the reply short."},
+            {Language::PT_BR, "Você pode gerenciar arquivos na pasta de trabalho do usuário usando EXATAMENTE estes marcadores na sua resposta: <<write nome.txt>> conteúdo <<end>> cria/sobrescreve; <<append nome.txt>> conteúdo <<end>> acrescenta; <<read nome.txt>> lê em voz alta; <<delete nome.txt>> apaga; <<list>> lista os arquivos. Use-os APENAS quando o usuário pedir uma ação de arquivo, e mantenha o resto da resposta curto."},
+            {Language::ES, "Puedes gestionar archivos en la carpeta de trabajo del usuario usando EXACTAMENTE estos marcadores en tu respuesta: <<write nombre.txt>> contenido <<end>> crea/sobrescribe; <<append nombre.txt>> contenido <<end>> añade; <<read nombre.txt>> lo lee en voz alta; <<delete nombre.txt>> borra; <<list>> lista los archivos. Úsalos SOLO cuando el usuario pida una acción de archivo, y mantén el resto de la respuesta corto."},
+            {Language::ZH, "你可以使用以下标记管理用户工作文件夹中的文件：<<write 名称.txt>> 内容 <<end>> 创建/覆盖；<<append 名称.txt>> 内容 <<end>> 追加；<<read 名称.txt>> 朗读；<<delete 名称.txt>> 删除；<<list>> 列出文件。仅在用户要求文件操作时使用，其余回答保持简短。"}
+        }},
+        {"voice_wake_prompt_prefix", {
+            {Language::EN, "The user calls you by the name"},
+            {Language::PT_BR, "O usuário te chama pelo nome"},
+            {Language::ES, "El usuario te llama por el nombre"},
+            {Language::ZH, "用户这样称呼你："}
+        }},
+        {"voice_file_saved", {
+            {Language::EN, "Saved"}, {Language::PT_BR, "Salvei o arquivo"},
+            {Language::ES, "Guardé el archivo"}, {Language::ZH, "已保存文件"}
+        }},
+        {"voice_file_deleted", {
+            {Language::EN, "Deleted"}, {Language::PT_BR, "Apaguei o arquivo"},
+            {Language::ES, "Borré el archivo"}, {Language::ZH, "已删除文件"}
+        }},
+        {"voice_file_missing", {
+            {Language::EN, "I couldn't find the file"}, {Language::PT_BR, "Não encontrei o arquivo"},
+            {Language::ES, "No encontré el archivo"}, {Language::ZH, "找不到文件"}
+        }},
+        {"voice_folder_empty", {
+            {Language::EN, "The folder is empty."}, {Language::PT_BR, "A pasta está vazia."},
+            {Language::ES, "La carpeta está vacía."}, {Language::ZH, "文件夹是空的。"}
+        }},
+        {"voice_done_msg", {
+            {Language::EN, "Done."}, {Language::PT_BR, "Feito."},
+            {Language::ES, "Hecho."}, {Language::ZH, "完成。"}
+        }},
+        {"voice_input_device_label", {
+            {Language::EN, "Input device (microphone):"}, {Language::PT_BR, "Dispositivo de entrada (microfone):"},
+            {Language::ES, "Dispositivo de entrada (micrófono):"}, {Language::ZH, "输入设备（麦克风）："}
+        }},
+        {"voice_output_device_label", {
+            {Language::EN, "Output device (speakers):"}, {Language::PT_BR, "Dispositivo de saída (alto-falantes):"},
+            {Language::ES, "Dispositivo de salida (altavoces):"}, {Language::ZH, "输出设备（扬声器）："}
+        }},
+        {"voice_device_default", {
+            {Language::EN, "System default"}, {Language::PT_BR, "Padrão do sistema"},
+            {Language::ES, "Predeterminado del sistema"}, {Language::ZH, "系统默认"}
+        }},
+        {"voice_devices_refresh", {
+            {Language::EN, "Refresh devices"}, {Language::PT_BR, "Atualizar dispositivos"},
+            {Language::ES, "Actualizar dispositivos"}, {Language::ZH, "刷新设备"}
+        }},
+        {"voice_devices_hint", {
+            {Language::EN, "The input device applies the next time the microphone starts; the output device applies immediately. Tip: speaking into a headset avoids the model hearing its own voice."},
+            {Language::PT_BR, "O dispositivo de entrada vale na próxima vez que o microfone iniciar; o de saída vale imediatamente. Dica: usar fone de ouvido evita que o modelo escute a própria voz."},
+            {Language::ES, "El dispositivo de entrada se aplica la próxima vez que inicie el micrófono; el de salida se aplica de inmediato. Consejo: usar auriculares evita que el modelo escuche su propia voz."},
+            {Language::ZH, "输入设备在下次麦克风启动时生效；输出设备立即生效。提示：使用耳机可避免模型听到自己的声音。"}
+        }},
+        {"voice_tts_failed", {
+            {Language::EN, "Speech synthesis failed - check the output device and the Windows voices (Settings > Time & Language > Speech)."},
+            {Language::PT_BR, "A síntese de voz falhou - verifique o dispositivo de saída e as vozes do Windows (Configurações > Hora e Idioma > Fala)."},
+            {Language::ES, "La síntesis de voz falló - verifica el dispositivo de salida y las voces de Windows (Configuración > Hora e idioma > Voz)."},
+            {Language::ZH, "语音合成失败——请检查输出设备和 Windows 语音（设置 > 时间和语言 > 语音）。"}
+        }},
+        {"voice_thinking_hint", {
+            {Language::EN, "For reasoning models (DeepSeek-R1, QwQ, Qwen-thinking): the reasoning is generated but never spoken — only the final answer is synthesized. Note: it adds noticeable delay before each spoken reply."},
+            {Language::PT_BR, "Para modelos de raciocínio (DeepSeek-R1, QwQ, Qwen-thinking): o raciocínio é gerado mas nunca falado — só a resposta final é sintetizada. Atenção: adiciona um atraso perceptível antes de cada resposta falada."},
+            {Language::ES, "Para modelos de razonamiento (DeepSeek-R1, QwQ, Qwen-thinking): el razonamiento se genera pero nunca se habla — solo la respuesta final se sintetiza. Atención: añade un retraso notable antes de cada respuesta hablada."},
+            {Language::ZH, "适用于推理模型（DeepSeek-R1、QwQ、Qwen-thinking）：推理会生成但不会朗读——只合成最终回答。注意：每次语音回答前会有明显延迟。"}
+        }},
+        {"voice_llm_label", {
+            {Language::EN, "Conversation model (LLM .gguf) — dedicated to this tab; the Chat tab's model doesn't need to be running:"},
+            {Language::PT_BR, "Modelo da conversa (LLM .gguf) — dedicado desta aba; o modelo da aba Chat não precisa estar iniciado:"},
+            {Language::ES, "Modelo de la conversación (LLM .gguf) — dedicado a esta pestaña; el modelo de la pestaña Chat no necesita estar iniciado:"},
+            {Language::ZH, "对话模型（LLM .gguf）——本选项卡专用；无需启动聊天选项卡的模型："}
+        }},
+        {"voice_llm_hint", {
+            {Language::EN, "If this server isn't running, the voice conversation falls back to the Chat tab's server (when available)."},
+            {Language::PT_BR, "Se este servidor não estiver rodando, a conversa por voz usa o servidor da aba Chat (quando disponível)."},
+            {Language::ES, "Si este servidor no está en ejecución, la conversación por voz usa el servidor de la pestaña Chat (cuando esté disponible)."},
+            {Language::ZH, "如果此服务器未运行，语音对话将回退使用聊天选项卡的服务器（如可用）。"}
+        }},
+        {"voice_mic_level_label", {
+            {Language::EN, "Microphone level (the red mark is the speech threshold — speak and adjust until your voice crosses it):"},
+            {Language::PT_BR, "Nível do microfone (a marca vermelha é o limiar de fala — fale e ajuste até sua voz passar dela):"},
+            {Language::ES, "Nivel del micrófono (la marca roja es el umbral de habla — habla y ajusta hasta que tu voz la cruce):"},
+            {Language::ZH, "麦克风电平（红色标记是语音阈值——说话并调整，直到您的声音超过它）："}
+        }},
+        {"voice_vad_thresh_label", {
+            {Language::EN, "Mic sensitivity (lower = more sensitive)"},
+            {Language::PT_BR, "Sensibilidade do mic (menor = mais sensível)"},
+            {Language::ES, "Sensibilidad del mic (menor = más sensible)"},
+            {Language::ZH, "麦克风灵敏度（越低越灵敏）"}
+        }},
+        {"voice_silence_label", {
+            {Language::EN, "Silence before answering"},
+            {Language::PT_BR, "Silêncio antes de responder"},
+            {Language::ES, "Silencio antes de responder"},
+            {Language::ZH, "回答前的静音时长"}
+        }},
+        {"voice_hotkey_label", {
+            {Language::EN, "Push-to-talk key:"}, {Language::PT_BR, "Tecla de falar:"},
+            {Language::ES, "Tecla para hablar:"}, {Language::ZH, "按住说话按键："}
+        }},
+        {"voice_hotkey_set", {
+            {Language::EN, "Change key"}, {Language::PT_BR, "Definir tecla"},
+            {Language::ES, "Definir tecla"}, {Language::ZH, "设置按键"}
+        }},
+        {"voice_hotkey_press", {
+            {Language::EN, "Press the key or combo now (Esc cancels)..."},
+            {Language::PT_BR, "Pressione a tecla ou combinação agora (Esc cancela)..."},
+            {Language::ES, "Presiona la tecla o combinación ahora (Esc cancela)..."},
+            {Language::ZH, "现在按下按键或组合键（Esc 取消）……"}
+        }},
+        {"voice_hotkey_hint", {
+            {Language::EN, "The key works GLOBALLY: even with the window minimized to the taskbar, hold it to talk and release to get the spoken answer. Combos like Shift+G work too."},
+            {Language::PT_BR, "A tecla funciona GLOBALMENTE: mesmo com a janela minimizada na barra de tarefas, segure para falar e solte para receber a resposta falada. Combinações como Shift+G também funcionam."},
+            {Language::ES, "La tecla funciona GLOBALMENTE: incluso con la ventana minimizada en la barra de tareas, mantenla para hablar y suéltala para recibir la respuesta hablada. Combinaciones como Shift+G también funcionan."},
+            {Language::ZH, "该按键全局有效：即使窗口最小化到任务栏，按住即可说话，松开即可听到语音回答。也支持 Shift+G 等组合键。"}
+        }},
+        {"voice_show_transcript", {
+            {Language::EN, "View conversation as text"}, {Language::PT_BR, "Ver conversa em texto"},
+            {Language::ES, "Ver conversación en texto"}, {Language::ZH, "查看文字记录"}
+        }},
+        {"voice_hide_transcript", {
+            {Language::EN, "Hide text"}, {Language::PT_BR, "Ocultar texto"},
+            {Language::ES, "Ocultar texto"}, {Language::ZH, "隐藏文字"}
+        }},
+        {"voice_whisper_model_label", {
+            {Language::EN, "Whisper model in use:"}, {Language::PT_BR, "Modelo Whisper em uso:"},
+            {Language::ES, "Modelo Whisper en uso:"}, {Language::ZH, "当前使用的 Whisper 模型："}
+        }},
+        {"voice_start_whisper", {
+            {Language::EN, "Start Whisper server"}, {Language::PT_BR, "Iniciar servidor Whisper"},
+            {Language::ES, "Iniciar servidor Whisper"}, {Language::ZH, "启动 Whisper 服务器"}
+        }},
+        {"voice_stop_whisper", {
+            {Language::EN, "Stop Whisper server"}, {Language::PT_BR, "Parar servidor Whisper"},
+            {Language::ES, "Detener servidor Whisper"}, {Language::ZH, "停止 Whisper 服务器"}
+        }},
+        {"voice_whisper_hint", {
+            {Language::EN, "The Whisper server transcribes your speech locally. It also powers the microphone buttons in the Chat and Agent tabs."},
+            {Language::PT_BR, "O servidor Whisper transcreve sua fala localmente. Ele também alimenta os botões de microfone das abas Chat e Agente."},
+            {Language::ES, "El servidor Whisper transcribe tu voz localmente. También alimenta los botones de micrófono de las pestañas Chat y Agente."},
+            {Language::ZH, "Whisper 服务器在本地转录您的语音。聊天和代理选项卡中的麦克风按钮也由它提供支持。"}
+        }},
+        {"voice_mode_free", {
+            {Language::EN, "Free mode (auto-detect speech)"}, {Language::PT_BR, "Modo livre (detecta a fala)"},
+            {Language::ES, "Modo libre (detecta el habla)"}, {Language::ZH, "自由模式（自动检测语音）"}
+        }},
+        {"voice_mode_ptt", {
+            {Language::EN, "Push to talk"}, {Language::PT_BR, "Apertar para falar"},
+            {Language::ES, "Pulsar para hablar"}, {Language::ZH, "按住说话"}
+        }},
+        {"voice_mode_free_hint", {
+            {Language::EN, "Just talk: the app detects when you start and stop speaking, answers out loud, and if you speak over the answer it stops and listens to you."},
+            {Language::PT_BR, "Apenas fale: o app detecta quando você começa e para de falar, responde em voz alta, e se você falar por cima da resposta ele para e te escuta."},
+            {Language::ES, "Solo habla: la app detecta cuándo empiezas y dejas de hablar, responde en voz alta, y si hablas sobre la respuesta se detiene y te escucha."},
+            {Language::ZH, "直接说话：应用会检测您何时开始和停止说话，并用语音回答；如果您在回答时说话，它会停下来听您说。"}
+        }},
+        {"voice_mode_ptt_hint", {
+            {Language::EN, "Hold the button while speaking; release to get the answer. Nothing is recorded while the button isn't pressed."},
+            {Language::PT_BR, "Segure o botão enquanto fala; solte para receber a resposta. Nada é gravado enquanto o botão não está pressionado."},
+            {Language::ES, "Mantén el botón mientras hablas; suéltalo para recibir la respuesta. No se graba nada mientras el botón no está presionado."},
+            {Language::ZH, "说话时按住按钮；松开即可获得回答。未按下按钮时不会录音。"}
+        }},
+        {"voice_start_button", {
+            {Language::EN, "Start voice conversation"}, {Language::PT_BR, "Iniciar conversa por voz"},
+            {Language::ES, "Iniciar conversación por voz"}, {Language::ZH, "开始语音对话"}
+        }},
+        {"voice_stop_button", {
+            {Language::EN, "End voice conversation"}, {Language::PT_BR, "Encerrar conversa por voz"},
+            {Language::ES, "Terminar conversación por voz"}, {Language::ZH, "结束语音对话"}
+        }},
+        {"voice_prereq_hint", {
+            {Language::EN, "Requires the Whisper server (above) AND an LLM server running (the Voice one above, or the Chat tab's as fallback)."},
+            {Language::PT_BR, "Requer o servidor Whisper (acima) E um servidor LLM rodando (o da Voz acima, ou o da aba Chat como alternativa)."},
+            {Language::ES, "Requiere el servidor Whisper (arriba) Y un servidor LLM en ejecución (el de Voz de arriba, o el de la pestaña Chat como alternativa)."},
+            {Language::ZH, "需要 Whisper 服务器（上方）和一个正在运行的 LLM 服务器（上方的语音专用服务器，或聊天选项卡的服务器作为备用）。"}
+        }},
+        {"voice_ptt_button", {
+            {Language::EN, "Hold to talk"}, {Language::PT_BR, "Segure para falar"},
+            {Language::ES, "Mantén para hablar"}, {Language::ZH, "按住说话"}
+        }},
+        {"voice_state_idle", {
+            {Language::EN, "Inactive"}, {Language::PT_BR, "Inativo"},
+            {Language::ES, "Inactivo"}, {Language::ZH, "未激活"}
+        }},
+        {"voice_state_listening", {
+            {Language::EN, "Listening..."}, {Language::PT_BR, "Ouvindo..."},
+            {Language::ES, "Escuchando..."}, {Language::ZH, "正在聆听……"}
+        }},
+        {"voice_state_thinking", {
+            {Language::EN, "Thinking..."}, {Language::PT_BR, "Pensando..."},
+            {Language::ES, "Pensando..."}, {Language::ZH, "思考中……"}
+        }},
+        {"voice_state_speaking", {
+            {Language::EN, "Speaking..."}, {Language::PT_BR, "Falando..."},
+            {Language::ES, "Hablando..."}, {Language::ZH, "说话中……"}
+        }},
+        {"voice_system_prompt", {
+            {Language::EN, "You are a voice assistant. Your answers will be read ALOUD by a speech synthesizer, so keep them short, conversational and natural. Never use markdown, lists, code blocks or special symbols."},
+            {Language::PT_BR, "Você é um assistente de voz. Suas respostas serão lidas EM VOZ ALTA por um sintetizador, então seja curto, conversacional e natural. Nunca use markdown, listas, blocos de código ou símbolos especiais."},
+            {Language::ES, "Eres un asistente de voz. Tus respuestas serán leídas EN VOZ ALTA por un sintetizador, así que sé breve, conversacional y natural. Nunca uses markdown, listas, bloques de código ni símbolos especiales."},
+            {Language::ZH, "你是语音助手。你的回答将由语音合成器大声朗读，因此请简短、口语化、自然。切勿使用 markdown、列表、代码块或特殊符号。"}
+        }},
         {"tab_conversations", {
             {Language::EN, "Conversations"}, {Language::PT_BR, "Conversas"},
             {Language::ES, "Conversaciones"}, {Language::ZH, "会话"}
@@ -294,6 +666,12 @@ private:
         {"status_loading", {
             {Language::EN, "Loading"}, {Language::PT_BR, "Carregando"},
             {Language::ES, "Cargando"}, {Language::ZH, "加载中"}
+        }},
+        {"server_missing_dll", {
+            {Language::EN, "(missing DLL: put llama-server.exe's DLLs in bin\\)"},
+            {Language::PT_BR, "(DLL faltando: coloque as DLLs do llama-server.exe em bin\\)"},
+            {Language::ES, "(falta DLL: coloca las DLLs de llama-server.exe en bin\\)"},
+            {Language::ZH, "（缺少 DLL：请将 llama-server.exe 的 DLL 放入 bin\\）"}
         }},
         {"view_server_log", {
             {Language::EN, "View server log"}, {Language::PT_BR, "Ver log do servidor"},

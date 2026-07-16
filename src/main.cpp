@@ -20,6 +20,9 @@
 #include "AgentEngine.h"
 #include "FolderPicker.h"
 #include "WebSearch.h"
+#include "AudioCapture.h"
+#include "SpeechToText.h"
+#include "Tts.h"
 
 #include <thread>
 #include <chrono>
@@ -50,6 +53,259 @@ static std::atomic<bool> g_agentWebSearchEnabled{false}; // idem, para o modo Ag
 // deixar a area central inteira para a conversa.
 static bool g_chatSidebarOpen = false;
 static bool g_agentSidebarOpen = false;
+
+// ===================== Voz (microfone / conversa falada) =====================
+static LlamaServerManager g_whisperServer;
+static char g_whisperModelPathBuffer[1024] = "";
+static int  g_whisperPort = 8090;
+static std::atomic<bool> g_whisperRunning{false};
+static std::atomic<bool> g_whisperReady{false};
+
+// Ditado por microfone nas abas Chat/Agente:
+// 0 = parado, 1 = gravando p/ Chat, 2 = gravando p/ Agente
+static std::atomic<int>  g_micRecordingTarget{0};
+static std::atomic<bool> g_micTranscribing{false};
+static std::mutex g_micMutex;
+static std::string g_pendingMicChat, g_pendingMicAgent, g_micError;
+
+// Aba Voz (conversa falada, sem texto)
+static std::atomic<bool> g_voiceModeActive{false};
+static std::atomic<bool> g_voicePttHeld{false};     // botao "segurar para falar"
+static std::atomic<int>  g_voiceState{0};            // 0 idle 1 ouvindo 2 pensando 3 falando
+static bool g_voiceFreeMode = true;                  // true = livre (VAD), false = apertar p/ falar
+static std::mutex g_voiceMutex;
+static std::string g_voiceStatusMsg;
+static std::vector<ChatTurn> g_voiceHistory;         // conversa em memoria (nao salva)
+
+// Download de modelos Whisper direto pelo app (repo oficial
+// ggerganov/whisper.cpp no Hugging Face). Todos os listados sao
+// MULTILINGUES (~99 idiomas, incluindo pt/en/es/zh) — as variantes
+// ".en" (so ingles) ficam de fora de proposito. Tamanhos aproximados.
+struct WhisperModelInfo {
+    const char* file;      // nome do arquivo no repo
+    const char* size;      // tamanho legivel
+    const char* qualityKey;// chave de localizacao da descricao
+};
+static const WhisperModelInfo kWhisperModels[] = {
+    { "ggml-tiny.bin",                 "75 MB",  "voice_q_fastest"     },
+    { "ggml-base.bin",                 "142 MB", "voice_q_fast"        },
+    { "ggml-small-q8_0.bin",           "264 MB", "voice_q_balanced"    },
+    { "ggml-small.bin",                "466 MB", "voice_q_recommended" },
+    { "ggml-medium-q8_0.bin",          "823 MB", "voice_q_accurate"    },
+    { "ggml-large-v3-turbo-q8_0.bin",  "874 MB", "voice_q_turbo_q"     },
+    { "ggml-medium.bin",               "1.5 GB", "voice_q_accurate"    },
+    { "ggml-large-v3-turbo.bin",       "1.6 GB", "voice_q_turbo"       },
+    { "ggml-large-v3.bin",             "2.9 GB", "voice_q_best"        },
+};
+static int g_whisperDlSelected = 3; // ggml-small.bin (recomendado)
+static DownloadState g_whisperDlState;
+
+// Servidor LLM dedicado da aba Voz: conversa por voz sem depender do
+// modelo da aba Chat estar iniciado.
+static LlamaServerManager g_voiceLlmServer;
+static char g_voiceModelPathBuffer[1024] = "";
+static int  g_voiceLlmPort = 8095;
+static std::atomic<bool> g_voiceLlmRunning{false};
+static std::atomic<bool> g_voiceLlmReady{false};
+
+// Parametros do modo livre, ajustaveis pelo usuario (persistidos):
+// - limiar RMS que conta como "fala" (sensibilidade do microfone)
+// - ms de silencio apos a fala para o modelo comecar a responder
+static float g_voiceVadThresh = 0.015f;
+static int   g_voiceSilenceMs = 900;
+
+// Tecla de "apertar para falar" (funciona GLOBALMENTE, ate minimizado,
+// via GetAsyncKeyState). mods: bit1=Shift, bit2=Ctrl, bit4=Alt.
+static int  g_voicePttVk = VK_SPACE;
+static int  g_voicePttMods = 0;
+static bool g_voiceCapturingHotkey = false; // "pressione a combinacao..."
+
+static bool VoiceHotkeyDown() {
+    if (g_voicePttVk == 0) return false;
+    if ((g_voicePttMods & 1) && !(GetAsyncKeyState(VK_SHIFT)   & 0x8000)) return false;
+    if ((g_voicePttMods & 2) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return false;
+    if ((g_voicePttMods & 4) && !(GetAsyncKeyState(VK_MENU)    & 0x8000)) return false;
+    return (GetAsyncKeyState(g_voicePttVk) & 0x8000) != 0;
+}
+
+// "Segurar para falar" efetivo: botao na tela OU tecla global.
+static bool VoicePttHeld() {
+    return g_voicePttHeld.load() || VoiceHotkeyDown();
+}
+
+// Nome legivel da combinacao (ex: "Shift+G", "Espaco")
+static std::string VoiceHotkeyName() {
+    std::string out;
+    if (g_voicePttMods & 2) out += "Ctrl+";
+    if (g_voicePttMods & 1) out += "Shift+";
+    if (g_voicePttMods & 4) out += "Alt+";
+    UINT sc = MapVirtualKeyA(g_voicePttVk, MAPVK_VK_TO_VSC);
+    LONG l = (LONG)(sc << 16);
+    switch (g_voicePttVk) {
+        case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+        case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+        case VK_PRIOR: case VK_NEXT: l |= (1 << 24); break;
+    }
+    char name[64] = "";
+    if (GetKeyNameTextA(l, name, sizeof(name)) > 0) out += name;
+    else out += "VK_" + std::to_string(g_voicePttVk);
+    return out;
+}
+
+static bool g_voiceShowTranscript = false; // "ver conversa em texto"
+static std::atomic<bool> g_voiceThinkingEnabled{false}; // reasoning no modo voz
+static std::atomic<bool> g_voiceWebSearchEnabled{false}; // pesquisa DuckDuckGo no modo voz
+static int g_voiceTtsVoice = -1;                         // voz do sintetizador (-1 = padrao)
+static bool g_voiceSidebarOpen = false;    // painel de engrenagem da aba Voz
+static std::string g_voiceFolder;          // pasta onde a voz pode mexer em arquivos
+
+// Palavra de ativacao ("wake word") do modo livre: com ela ligada, o
+// modelo so responde se voce chamar pelo nome (ex: "Pato, que horas sao").
+static bool g_voiceWakeEnabled = false;
+static char g_voiceWakeWordBuffer[64] = "Assistente";
+// Palavra de INTERRUPCAO: dita enquanto o modelo fala, corta a fala na
+// hora. Vazia = interrupcao por volume (comportamento antigo). Com uma
+// palavra definida, a interrupcao por palavra e muito mais robusta: o
+// microfone tambem escuta o alto-falante, mas a resposta do modelo
+// dificilmente contem a palavra escolhida.
+static char g_voiceStopWordBuffer[64] = "";
+static int g_voiceInputDevice = -1;   // -1 = padrao do sistema
+static int g_voiceOutputDevice = -1;  // -1 = padrao do sistema
+
+// Normaliza para comparacao: minusculas e sem acentos comuns do PT/ES
+// (a transcricao do whisper vem acentuada; "Á" precisa casar com "a").
+static std::string FoldAccentsLower(const std::string& in) {
+    static const struct { const char* from; char to; } map[] = {
+        {"\xC3\xA1",'a'},{"\xC3\xA0",'a'},{"\xC3\xA2",'a'},{"\xC3\xA3",'a'},{"\xC3\xA4",'a'},
+        {"\xC3\x81",'a'},{"\xC3\x80",'a'},{"\xC3\x82",'a'},{"\xC3\x83",'a'},{"\xC3\x84",'a'},
+        {"\xC3\xA9",'e'},{"\xC3\xA8",'e'},{"\xC3\xAA",'e'},{"\xC3\x89",'e'},{"\xC3\x88",'e'},{"\xC3\x8A",'e'},
+        {"\xC3\xAD",'i'},{"\xC3\xAC",'i'},{"\xC3\x8D",'i'},{"\xC3\x8C",'i'},
+        {"\xC3\xB3",'o'},{"\xC3\xB2",'o'},{"\xC3\xB4",'o'},{"\xC3\xB5",'o'},{"\xC3\x93",'o'},{"\xC3\x94",'o'},{"\xC3\x95",'o'},
+        {"\xC3\xBA",'u'},{"\xC3\xB9",'u'},{"\xC3\x9A",'u'},{"\xC3\xBC",'u'},
+        {"\xC3\xA7",'c'},{"\xC3\x87",'c'},{"\xC3\xB1",'n'},{"\xC3\x91",'n'},
+    };
+    std::string s = in;
+    for (auto& m : map) {
+        size_t p = 0;
+        while ((p = s.find(m.from, p)) != std::string::npos) s.replace(p, 2, 1, m.to);
+    }
+    for (auto& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+// A transcricao contem a palavra de ativacao?
+static bool ContainsWakeWord(const std::string& transcript) {
+    std::string wake = FoldAccentsLower(g_voiceWakeWordBuffer);
+    while (!wake.empty() && wake.back() == ' ') wake.pop_back();
+    if (wake.empty()) return true;
+    return FoldAccentsLower(transcript).find(wake) != std::string::npos;
+}
+
+static bool ContainsStopWord(const std::string& transcript) {
+    std::string stop = FoldAccentsLower(g_voiceStopWordBuffer);
+    while (!stop.empty() && stop.back() == ' ') stop.pop_back();
+    if (stop.empty()) return false;
+    return FoldAccentsLower(transcript).find(stop) != std::string::npos;
+}
+
+// ===================== Bandeja do sistema (system tray) =====================
+// Opcoes (em Configuracoes): minimizar leva para a bandeja ao lado do
+// relogio, e fechar esconde para a bandeja em vez de sair — o app segue
+// rodando (inclusive a conversa por voz com a tecla global).
+static bool g_minimizeToTray = false;
+static bool g_closeToTray = false;
+static bool g_reallyQuit = false;          // "Sair" do menu da bandeja
+static bool g_trayIconVisible = false;
+static HWND g_hwnd = nullptr;
+static WNDPROC g_originalWndProc = nullptr;
+static GLFWwindow* g_glfwWindow = nullptr;
+#define WM_TRAYICON (WM_APP + 1)
+
+static void TrayAddIcon() {
+    if (g_trayIconVisible || !g_hwnd) return;
+    NOTIFYICONDATAA nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    // Usa o icone do proprio executavel; se nao tiver, o padrao do Windows
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    HICON icon = ExtractIconW(GetModuleHandleW(nullptr), exePath, 0);
+    nid.hIcon = (icon && icon != (HICON)1) ? icon : LoadIcon(nullptr, IDI_APPLICATION);
+    strncpy(nid.szTip, "DuckFaceLLM", sizeof(nid.szTip) - 1);
+    Shell_NotifyIconA(NIM_ADD, &nid);
+    g_trayIconVisible = true;
+}
+
+static void TrayRemoveIcon() {
+    if (!g_trayIconVisible || !g_hwnd) return;
+    NOTIFYICONDATAA nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_hwnd;
+    nid.uID = 1;
+    Shell_NotifyIconA(NIM_DELETE, &nid);
+    g_trayIconVisible = false;
+}
+
+static void TrayHideWindow() {
+    TrayAddIcon();
+    ShowWindow(g_hwnd, SW_HIDE);
+}
+
+static void TrayRestoreWindow() {
+    ShowWindow(g_hwnd, SW_SHOW);
+    ShowWindow(g_hwnd, SW_RESTORE);
+    SetForegroundWindow(g_hwnd);
+    TrayRemoveIcon();
+}
+
+// Mensagem registrada usada pela segunda instancia para pedir "mostre-se"
+// a instancia que ja esta rodando.
+static UINT WmShowMe() {
+    static UINT m = RegisterWindowMessageA("DuckFaceLLM_ShowMe");
+    return m;
+}
+
+static LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WmShowMe()) {
+        TrayRestoreWindow();
+        return 0;
+    }
+    if (msg == WM_TRAYICON) {
+        if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+            TrayRestoreWindow();
+        } else if (lParam == WM_RBUTTONUP) {
+            HMENU menu = CreatePopupMenu();
+            AppendMenuA(menu, MF_STRING, 1, Localization::T("tray_restore"));
+            AppendMenuA(menu, MF_STRING, 2, Localization::T("tray_quit"));
+            POINT pt; GetCursorPos(&pt);
+            SetForegroundWindow(hwnd); // exigido pelo TrackPopupMenu
+            int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+            DestroyMenu(menu);
+            if (cmd == 1) TrayRestoreWindow();
+            else if (cmd == 2) { g_reallyQuit = true; TrayRemoveIcon(); if (g_glfwWindow) glfwSetWindowShouldClose(g_glfwWindow, GLFW_TRUE); }
+        }
+        return 0;
+    }
+    // Minimizar -> bandeja (se a opcao estiver ligada)
+    if (msg == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_MINIMIZE && g_minimizeToTray) {
+        TrayHideWindow();
+        return 0;
+    }
+    return CallWindowProc(g_originalWndProc, hwnd, msg, wParam, lParam);
+}
+
+// Idioma da UI -> codigo de idioma do whisper (transcricao mais precisa)
+static const char* WhisperLangCode() {
+    switch (Localization::GetLanguage()) {
+        case Language::PT_BR: return "pt";
+        case Language::ES:    return "es";
+        case Language::ZH:    return "zh";
+        default:              return "en";
+    }
+}
 static std::atomic<bool> g_isGenerating{false};
 static std::atomic<bool> g_stopRequested{false};
 static std::atomic<bool> g_serverRunning{false};
@@ -1237,6 +1493,21 @@ static void DownloadWorker(std::string repo, std::string filename, std::string t
 // (meaning the model has finished loading and is actually ready to serve
 // requests) or the server is stopped. This is what drives the orange
 // "loading" vs green "ready" distinction in the status dot.
+static void PollWhisperReady() {
+    while (g_whisperRunning.load()) {
+        if (!g_whisperServer.ProcessAlive()) {
+            g_whisperRunning = false;
+            g_whisperReady = false;
+            return;
+        }
+        if (SpeechToText::CheckHealth(g_whisperPort)) {
+            g_whisperReady = true;
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+
 // The optional `server` pointer lets the poller also notice when the
 // llama-server process itself DIED during startup (corrupted model, port
 // already in use, out of VRAM...). Before this, a crashed server left the
@@ -1276,6 +1547,80 @@ static bool GearButton(const char* id) {
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(3);
     return clicked;
+}
+
+// Botao vermelho com um microfone BRANCO desenhado via ImDrawList (nao
+// dependemos de glifo de emoji, que exigiria fonte/wchar32). `active`
+// deixa o botao pulsando enquanto grava.
+static bool DrawMicButton(const char* id, bool active) {
+    float pulse = active ? (0.75f + 0.25f * sinf((float)ImGui::GetTime() * 6.0f)) : 1.0f;
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.80f * pulse, 0.15f * pulse, 0.15f * pulse, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.22f, 0.22f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.65f, 0.10f, 0.10f, 1.0f));
+    ImVec2 size(38, 32);
+    bool clicked = ImGui::Button(id, size);
+    ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+    ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImU32 white = IM_COL32(255, 255, 255, 255);
+    float h = (mx.y - mn.y);
+    float capR = h * 0.14f;                       // largura da capsula
+    float capTop = c.y - h * 0.30f, capBot = c.y; // corpo do mic
+    dl->AddRectFilled(ImVec2(c.x - capR, capTop), ImVec2(c.x + capR, capBot), white, capR);
+    dl->PathArcTo(ImVec2(c.x, capBot - 2.0f), capR + 4.0f, 0.0f, 3.14159f, 12); // suporte
+    dl->PathStroke(white, 0, 2.0f);
+    dl->AddLine(ImVec2(c.x, capBot + capR + 1.0f), ImVec2(c.x, c.y + h * 0.30f), white, 2.0f); // haste
+    dl->AddLine(ImVec2(c.x - capR - 1.0f, c.y + h * 0.30f), ImVec2(c.x + capR + 1.0f, c.y + h * 0.30f), white, 2.0f); // base
+    ImGui::PopStyleColor(3);
+    return clicked;
+}
+
+// Alterna a gravacao por microfone para o Chat (target=1) ou Agente (2).
+// Primeiro clique inicia a captura; segundo clique para, transcreve em
+// background e o texto e ANEXADO ao campo de mensagem da aba.
+static void ToggleMicRecording(int target) {
+    if (g_micTranscribing.load()) return; // aguarde a transcricao atual
+
+    int current = g_micRecordingTarget.load();
+    if (current == 0) {
+        if (!g_whisperReady.load()) {
+            std::lock_guard<std::mutex> lock(g_micMutex);
+            g_micError = Localization::T("mic_needs_whisper");
+            return;
+        }
+        if (!AudioCapture::Instance().Start()) {
+            std::lock_guard<std::mutex> lock(g_micMutex);
+            g_micError = Localization::T("mic_open_failed");
+            return;
+        }
+        AudioCapture::Instance().Drain(); // descarta lixo acumulado
+        {
+            std::lock_guard<std::mutex> lock(g_micMutex);
+            g_micError.clear();
+        }
+        g_micRecordingTarget = target;
+    } else if (current == target) {
+        g_micRecordingTarget = 0;
+        auto samples = AudioCapture::Instance().Drain();
+        AudioCapture::Instance().Stop();
+        if (samples.size() < AudioCapture::kSampleRate / 4) return; // < 0.25s: ruido
+        g_micTranscribing = true;
+        std::thread([samples = std::move(samples), target]() {
+            auto wav = AudioCapture::MakeWav(samples);
+            std::string err;
+            std::string text = SpeechToText::Transcribe(wav, g_whisperPort, WhisperLangCode(), err);
+            {
+                std::lock_guard<std::mutex> lock(g_micMutex);
+                if (!err.empty()) g_micError = err;
+                else if (!text.empty()) {
+                    if (target == 1) g_pendingMicChat += (g_pendingMicChat.empty() ? "" : " ") + text;
+                    else             g_pendingMicAgent += (g_pendingMicAgent.empty() ? "" : " ") + text;
+                }
+            }
+            g_micTranscribing = false;
+        }).detach();
+    }
+    // se estiver gravando para a OUTRA aba, ignora o clique
 }
 
 static void DrawServerStatusDot(bool running, bool ready, LlamaServerManager* server = nullptr) {
@@ -1318,6 +1663,38 @@ static void DrawServerStatusDot(bool running, bool ready, LlamaServerManager* se
             ShellExecuteA(nullptr, "open", server->LogFilePath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
         ImGui::SameLine();
+        // Codigo de saida do processo morto: o diagnostico mais direto.
+        // 0xC0000135 = DLL faltando (o log fica VAZIO nesse caso, porque o
+        // processo morre no loader do Windows antes de escrever qualquer
+        // coisa) — a causa classica e o llama-server.exe sem as DLLs dele
+        // (cudart/cublas/ggml) na pasta bin\.
+        DWORD code = server->LastExitCode();
+        if (code != 0) {
+            ImGui::TextColored(ImVec4(1, 0.55f, 0.4f, 1), "exit 0x%08X", (unsigned)code);
+            if (code == 0xC0000135) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1, 0.55f, 0.4f, 1), "%s", Localization::T("server_missing_dll"));
+            }
+            ImGui::SameLine();
+        }
+    }
+}
+
+// Para o modo voz e o whisper tambem no encerramento
+// (chamado junto do StopAllServers no fim do main)
+static void StopVoiceSystems() {
+    g_voiceModeActive = false;
+    if (g_micRecordingTarget.load() != 0) {
+        g_micRecordingTarget = 0;
+        AudioCapture::Instance().Stop();
+    }
+    if (g_whisperRunning.load()) {
+        g_whisperServer.Stop();
+        g_whisperRunning = false;
+    }
+    if (g_voiceLlmRunning.load()) {
+        g_voiceLlmServer.Stop();
+        g_voiceLlmRunning = false;
     }
 }
 
@@ -1326,6 +1703,10 @@ static void DrawServerStatusDot(bool running, bool ready, LlamaServerManager* se
 // for freeing RAM/VRAM quickly or switching models without hunting down
 // each Stop button individually.
 static void StopAllServers() {
+    // Tambem encerra o modo voz e os servidores dele (whisper + LLM da voz)
+    g_voiceModeActive = false;
+    if (g_whisperRunning.load()) { g_whisperServer.Stop(); g_whisperRunning = false; g_whisperReady = false; }
+    if (g_voiceLlmRunning.load()) { g_voiceLlmServer.Stop(); g_voiceLlmRunning = false; g_voiceLlmReady = false; }
     if (g_serverRunning.load()) { g_server.Stop(); g_serverRunning = false; g_serverReady = false; }
     if (g_agentServerRunning.load()) { g_agentServer.Stop(); g_agentServerRunning = false; g_agentServerReady = false; }
     if (g_reviewerServerRunning.load()) { g_reviewerServer.Stop(); g_reviewerServerRunning = false; g_reviewerServerReady = false; }
@@ -1342,6 +1723,26 @@ static void SaveConfigFromState() {
     cfg.thinkingEnabled = g_thinkingEnabled.load();
     cfg.webSearchEnabled = g_webSearchEnabled.load();
     cfg.agentWebSearchEnabled = g_agentWebSearchEnabled.load();
+    cfg.whisperModelPath = g_whisperModelPathBuffer;
+    cfg.whisperPort = g_whisperPort;
+    cfg.voiceFreeMode = g_voiceFreeMode;
+    cfg.voiceModelPath = g_voiceModelPathBuffer;
+    cfg.voiceLlmPort = g_voiceLlmPort;
+    cfg.voiceVadThresh = g_voiceVadThresh;
+    cfg.voiceSilenceMs = g_voiceSilenceMs;
+    cfg.voicePttVk = g_voicePttVk;
+    cfg.voicePttMods = g_voicePttMods;
+    cfg.voiceFolder = g_voiceFolder;
+    cfg.voiceWakeEnabled = g_voiceWakeEnabled;
+    cfg.voiceWakeWord = g_voiceWakeWordBuffer;
+    cfg.minimizeToTray = g_minimizeToTray;
+    cfg.closeToTray = g_closeToTray;
+    cfg.voiceInputDevice = g_voiceInputDevice;
+    cfg.voiceOutputDevice = g_voiceOutputDevice;
+    cfg.voiceThinkingEnabled = g_voiceThinkingEnabled.load();
+    cfg.voiceStopWord = g_voiceStopWordBuffer;
+    cfg.voiceWebSearchEnabled = g_voiceWebSearchEnabled.load();
+    cfg.voiceTtsVoice = g_voiceTtsVoice;
     cfg.lastModelPath = g_modelPathBuffer;
     cfg.serverPort = g_port;
     cfg.sampling = g_sampling;
@@ -1371,6 +1772,399 @@ static void StartNewConversation() {
 }
 
 // ===================== Screens =====================
+
+// Remove da resposta tudo que soa mal no sintetizador: blocos de codigo,
+// marcacao markdown (asteriscos, cerquilhas, crases), URLs compridas.
+// O system prompt ja pede resposta natural; isto e a rede de seguranca.
+static std::string CleanForSpeech(const std::string& in) {
+    std::string s = in;
+
+    // Modelos de reasoning as vezes despejam a analise no conteudo, com
+    // marcadores de "canal" (ex: <|channel|>analysis ... <|channel|>final
+    // <|message|>resposta). Para a fala, ficamos so com o que vem depois
+    // do ULTIMO <|message|> — a resposta final — e removemos qualquer
+    // token <|...|> remanescente. Tambem cortamos blocos <think>.
+    {
+        size_t m = s.rfind("<|message|>");
+        if (m != std::string::npos) s = s.substr(m + 11);
+        auto split = HttpClient::SplitThinking(s);
+        if (!split.finalAnswer.empty()) s = split.finalAnswer;
+        size_t a;
+        while ((a = s.find("<|")) != std::string::npos) {
+            size_t b = s.find("|>", a);
+            if (b == std::string::npos) { s.erase(a); break; }
+            s.erase(a, b - a + 2);
+        }
+    }
+    // blocos ``` ... ``` viram uma mencao curta
+    size_t p;
+    while ((p = s.find("```")) != std::string::npos) {
+        size_t e = s.find("```", p + 3);
+        if (e == std::string::npos) { s.erase(p); break; }
+        s.replace(p, e - p + 3, "");
+    }
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (c == '*' || c == '`' || c == '#' || c == '_' || c == '>' || c == '|') continue;
+        out += c;
+    }
+    return out;
+}
+
+// ---- Comandos de arquivo emitidos pelo modelo no modo voz ----
+// Quando uma pasta de trabalho esta definida, o system prompt instrui o
+// modelo a usar estes marcadores; aqui eles sao executados DENTRO do
+// sandbox (mesma protecao ResolveSafePath do Agente) e removidos do texto
+// falado, trocados por confirmacoes curtas.
+//   <<write nome.txt>> conteudo <<end>>   cria/sobrescreve
+//   <<append nome.txt>> conteudo <<end>>  acrescenta ao fim
+//   <<read nome.txt>>                      le (o conteudo e falado)
+//   <<delete nome.txt>>                    apaga
+//   <<list>>                               lista os arquivos
+static std::string ExecuteVoiceFileCommands(const std::string& answer) {
+    if (g_voiceFolder.empty()) return answer;
+    std::string s = answer, spoken;
+    size_t pos = 0;
+    auto confirm = [&](const char* key, const std::string& name) {
+        spoken += std::string(Localization::T(key)) + " " + name + ". ";
+    };
+    while (pos < s.size()) {
+        size_t open = s.find("<<", pos);
+        if (open == std::string::npos) { spoken += s.substr(pos); break; }
+        spoken += s.substr(pos, open - pos);
+        size_t close = s.find(">>", open);
+        if (close == std::string::npos) { spoken += s.substr(open); break; }
+        std::string cmd = s.substr(open + 2, close - open - 2);
+        pos = close + 2;
+
+        std::filesystem::path abs;
+        std::string err;
+        auto rest = [&](const std::string& c, const char* verb) -> std::string {
+            return c.substr(strlen(verb));
+        };
+        auto trim = [](std::string t) {
+            while (!t.empty() && t.front() == ' ') t.erase(t.begin());
+            while (!t.empty() && (t.back() == ' ' || t.back() == '\n')) t.pop_back();
+            return t;
+        };
+
+        if (cmd.rfind("write ", 0) == 0 || cmd.rfind("append ", 0) == 0) {
+            bool append = cmd.rfind("append ", 0) == 0;
+            std::string name = trim(rest(cmd, append ? "append " : "write "));
+            size_t end = s.find("<<end>>", pos);
+            std::string content = (end == std::string::npos) ? s.substr(pos) : s.substr(pos, end - pos);
+            pos = (end == std::string::npos) ? s.size() : end + 7;
+            content = trim(content);
+            if (AgentEngine::ResolveSafePath(g_voiceFolder, name, abs, err)) {
+                try { std::filesystem::create_directories(abs.parent_path()); } catch (...) {}
+                std::ofstream f(abs, append ? std::ios::app : std::ios::trunc);
+                if (f.is_open()) { f << content; if (append) f << "\n"; confirm("voice_file_saved", name); }
+                else spoken += err + " ";
+            } else spoken += err + " ";
+        } else if (cmd.rfind("read ", 0) == 0) {
+            std::string name = trim(rest(cmd, "read "));
+            if (AgentEngine::ResolveSafePath(g_voiceFolder, name, abs, err) && std::filesystem::exists(abs)) {
+                std::ifstream f(abs);
+                std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                if (content.size() > 1500) content = content.substr(0, 1500);
+                spoken += content + " ";
+            } else confirm("voice_file_missing", name);
+        } else if (cmd.rfind("delete ", 0) == 0) {
+            std::string name = trim(rest(cmd, "delete "));
+            if (AgentEngine::ResolveSafePath(g_voiceFolder, name, abs, err) &&
+                std::filesystem::remove(abs)) confirm("voice_file_deleted", name);
+            else confirm("voice_file_missing", name);
+        } else if (cmd == "list") {
+            std::string names;
+            try {
+                for (auto& e : std::filesystem::directory_iterator(g_voiceFolder))
+                    if (e.is_regular_file()) names += e.path().filename().string() + ", ";
+            } catch (...) {}
+            spoken += names.empty() ? std::string(Localization::T("voice_folder_empty")) + " " : names;
+        } else {
+            spoken += "<<" + cmd + ">>"; // desconhecido: mantem
+        }
+    }
+    return spoken;
+}
+
+// ===================== Conversa por voz (aba Voz) =====================
+// Maquina de estados: OUVINDO -> (fala detectada/PTT solto) -> transcreve
+// -> PENSANDO (LLM no servidor do Chat) -> FALANDO (SAPI) -> volta a ouvir.
+// No modo livre, falar DURANTE a resposta interrompe a fala/geracao e o
+// app volta a escutar (barge-in). Nada e mostrado como texto nem salvo.
+static void VoiceWorker() {
+    auto& cap = AudioCapture::Instance();
+
+    // A conversa por voz agora e persistida como uma conversa normal do
+    // Chat: aparece na aba Conversas > Historico, com titulo "[Voz] ...".
+    Conversation voiceConv = g_chatConvMgr.NewConversation();
+    bool voiceConvTitled = false;
+    const int kMinSpeechMs = 200;         // fala minima para nao disparar em ruido
+
+    if (!cap.Start()) {
+        std::lock_guard<std::mutex> lock(g_voiceMutex);
+        g_voiceStatusMsg = Localization::T("mic_open_failed");
+        g_voiceModeActive = false;
+        g_voiceState = 0;
+        return;
+    }
+
+    while (g_voiceModeActive.load()) {
+        // ---------- FASE 1: capturar a fala do usuario ----------
+        g_voiceState = 1;
+        cap.Drain();
+        std::vector<int16_t> collected;
+        bool speechStarted = false;
+        int speechMs = 0, silenceMs = 0;
+
+        while (g_voiceModeActive.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            auto chunk = cap.Drain();
+            bool ptt = VoicePttHeld();
+
+            if (!g_voiceFreeMode) {
+                // Modo "apertar para falar": grava exatamente enquanto o
+                // botao esta pressionado; soltou, envia.
+                if (ptt) {
+                    collected.insert(collected.end(), chunk.begin(), chunk.end());
+                    speechStarted = true;
+                } else if (speechStarted) {
+                    break; // soltou o botao -> transcrever
+                }
+                continue;
+            }
+
+            // Modo livre: deteccao automatica de inicio/fim de fala (VAD
+            // por energia). Mantem ~0,5s de "pre-roll" para nao cortar o
+            // comeco da primeira palavra.
+            // BUG CORRIGIDO: o waveIn entrega buffers de ~100ms, mas este
+            // loop drena a cada 50ms — metade das leituras vinha VAZIA
+            // (RMS 0), o que ZERAVA o contador de fala a cada iteracao e a
+            // fala nunca era "detectada" (por isso o modo livre nao
+            // escutava nada). Agora chunks vazios nao mexem nos
+            // contadores, e o tempo e medido pelas AMOSTRAS recebidas
+            // (n/16 = ms a 16 kHz), nao pelo relogio do loop.
+            float kVadThresh = g_voiceVadThresh;      // ajustavel na UI
+            int kSilenceEndMs = g_voiceSilenceMs;      // ajustavel na UI
+            collected.insert(collected.end(), chunk.begin(), chunk.end());
+            if (!speechStarted) {
+                size_t keep = (size_t)AudioCapture::kSampleRate / 2;
+                if (collected.size() > keep)
+                    collected.erase(collected.begin(), collected.end() - keep);
+            }
+            if (chunk.empty()) continue; // sem audio novo: contadores intactos
+
+            int chunkMs = (int)(chunk.size() * 1000 / AudioCapture::kSampleRate);
+            float rms = AudioCapture::Rms(chunk.data(), chunk.size());
+            if (rms > kVadThresh) {
+                speechMs += chunkMs;
+                silenceMs = 0;
+                if (!speechStarted && speechMs >= kMinSpeechMs) speechStarted = true;
+            } else if (speechStarted) {
+                silenceMs += chunkMs;
+                if (silenceMs >= kSilenceEndMs) break; // fim da fala
+            } else {
+                // decai em vez de zerar: um buffer mais fraco no meio de
+                // uma palavra nao descarta o progresso
+                speechMs = speechMs > chunkMs ? speechMs - chunkMs : 0;
+            }
+        }
+        if (!g_voiceModeActive.load()) break;
+        if (collected.size() < (size_t)AudioCapture::kSampleRate / 4) continue;
+
+        // ---------- FASE 2: transcrever ----------
+        g_voiceState = 2;
+        std::string err;
+        std::string userText = SpeechToText::Transcribe(
+            AudioCapture::MakeWav(collected), g_whisperPort, WhisperLangCode(), err);
+        if (userText.empty()) {
+            std::lock_guard<std::mutex> lock(g_voiceMutex);
+            if (!err.empty()) g_voiceStatusMsg = err;
+            continue;
+        }
+
+        // Palavra de ativacao (so no modo livre): sem o nome na fala, o
+        // app ignora e volta a escutar — conversas de fundo nao disparam.
+        if (g_voiceFreeMode && g_voiceWakeEnabled && !ContainsWakeWord(userText)) {
+            continue;
+        }
+
+        // ---------- FASE 2.5: pesquisa na web (opcional) ----------
+        // Igual ao Chat: contexto EFEMERO injetado so nesta requisicao;
+        // a conversa salva e o transcript ficam limpos. As URLs das
+        // fontes nao sao faladas (falar links e insuportavel), mas vao
+        // anexadas na conversa salva no historico.
+        std::string webContext;
+        std::vector<std::string> webSources;
+        if (g_voiceWebSearchEnabled.load()) {
+            std::lock_guard<std::mutex> lock(g_voiceMutex);
+            g_voiceStatusMsg = Localization::T("web_searching");
+        }
+        if (g_voiceWebSearchEnabled.load()) {
+            webContext = WebSearch::BuildContext(userText, webSources, 2, 4000);
+            std::lock_guard<std::mutex> lock(g_voiceMutex);
+            g_voiceStatusMsg.clear();
+        }
+
+        // ---------- FASE 3: gerar a resposta (servidor do Chat) ----------
+        std::vector<ChatTurn> history;
+        {
+            std::lock_guard<std::mutex> lock(g_voiceMutex);
+            ChatTurn sys;
+            sys.role = "system";
+            sys.content = Localization::T("voice_system_prompt");
+            if (!g_voiceFolder.empty()) {
+                sys.content += "\n";
+                sys.content += Localization::T("voice_file_prompt");
+            }
+            if (g_voiceWakeEnabled && strlen(g_voiceWakeWordBuffer) > 0) {
+                sys.content += "\n";
+                sys.content += std::string(Localization::T("voice_wake_prompt_prefix")) + " \"" +
+                               g_voiceWakeWordBuffer + "\".";
+            }
+            history.push_back(sys);
+            ChatTurn u; u.role = "user"; u.content = userText;
+            g_voiceHistory.push_back(u);
+            for (auto& t : g_voiceHistory) history.push_back(t);
+        }
+        if (!webContext.empty() && !history.empty())
+            history.back().content += "\n\n" + webContext;
+
+        std::string answer;
+        std::atomic<bool> barge{false};
+        auto bargeStart = std::chrono::steady_clock::now();
+        bool bargeCounting = false;
+        // Usa o servidor dedicado da Voz se estiver rodando; senao, cai
+        // para o servidor da aba Chat (compatibilidade com o fluxo antigo).
+        int llmPort = (g_voiceLlmRunning.load() && g_voiceLlmReady.load()) ? g_voiceLlmPort : g_port;
+        // Com o pensamento ligado, o reasoning e gerado mas NAO e falado:
+        // o onDelta abaixo ja descarta os deltas de raciocinio, entao so a
+        // resposta final chega ao sintetizador (e ao transcript).
+        HttpClient::ChatStream(history, llmPort, g_sampling, g_voiceThinkingEnabled.load(),
+            [&](bool isReasoning, const std::string& text) {
+                if (!isReasoning) answer += text;
+            },
+            [&]() {
+                if (!g_voiceModeActive.load()) return true;
+                // Barge-in durante a geracao (modo livre): fala sustentada
+                // por ~250ms cancela a resposta e volta a escutar.
+                if (g_voiceFreeMode) {
+                    if (cap.Level() > g_voiceVadThresh) {
+                        if (!bargeCounting) { bargeCounting = true; bargeStart = std::chrono::steady_clock::now(); }
+                        else if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - bargeStart).count() > 250) {
+                            barge = true; return true;
+                        }
+                    } else bargeCounting = false;
+                } else if (VoicePttHeld()) { barge = true; return true; }
+                return false;
+            });
+        if (!g_voiceModeActive.load()) break;
+        if (barge.load() || answer.empty()) continue; // interrompido: escutar de novo
+
+        {
+            std::lock_guard<std::mutex> lock(g_voiceMutex);
+            ChatTurn a; a.role = "assistant"; a.content = answer;
+            g_voiceHistory.push_back(a);
+        }
+
+        // Persiste o par pergunta/resposta no historico do Chat
+        {
+            if (!voiceConvTitled) {
+                std::string t = userText.substr(0, 40);
+                voiceConv.title = "[Voz] " + t + (userText.size() > 40 ? "..." : "");
+                voiceConvTitled = true;
+            }
+            ChatMessage um; um.role = "user"; um.content = userText;
+            ChatMessage am; am.role = "assistant"; am.content = answer;
+            if (!webSources.empty()) {
+                am.content += "\n\n" + std::string(Localization::T("web_sources_label"));
+                for (auto& u : webSources) am.content += "\n- " + u;
+            }
+            voiceConv.messages.push_back(um);
+            voiceConv.messages.push_back(am);
+            g_chatConvMgr.Save(voiceConv);
+            RefreshConversationList();
+        }
+
+        // ---------- FASE 4: executar comandos de arquivo e falar ----------
+        g_voiceState = 3;
+        cap.Drain(); // limpa o que entrou durante a geracao
+        std::string spoken = CleanForSpeech(ExecuteVoiceFileCommands(answer));
+        if (spoken.empty()) spoken = Localization::T("voice_done_msg");
+        if (!Tts::Instance().Speak(spoken)) {
+            std::lock_guard<std::mutex> lock(g_voiceMutex);
+            g_voiceStatusMsg = Localization::T("voice_tts_failed");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300)); // TTS inicia
+        bargeCounting = false;
+        // Protecoes contra o barge-in "engolir" a propria resposta (a
+        // causa das respostas mudas): (a) carencia de 800ms no comeco da
+        // fala, (b) exige som sustentado por 600ms acima de um limiar bem
+        // mais alto que o do VAD (o mic tambem escuta o alto-falante).
+        auto speakStart = std::chrono::steady_clock::now();
+        bool useStopWord = g_voiceFreeMode && strlen(g_voiceStopWordBuffer) > 0;
+        std::vector<int16_t> stopSeg;         // segmento de fala capturado durante a resposta
+        int stopSpeechMs = 0, stopSilMs = 0;
+        bool stopSegActive = false;
+        while (g_voiceModeActive.load() && Tts::Instance().IsSpeaking()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            bool interrupt = false;
+            long sinceStart = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - speakStart).count();
+
+            if (useStopWord && sinceStart > 400) {
+                // Interrupcao POR PALAVRA: um mini-VAD captura o que voce
+                // fala por cima da resposta; quando o trecho termina (ou
+                // passa de 2,5s), ele e transcrito e, se contiver a
+                // palavra de interrupcao, a fala e cortada na hora.
+                auto chunk = cap.Drain();
+                if (!chunk.empty()) {
+                    int chunkMs = (int)(chunk.size() * 1000 / AudioCapture::kSampleRate);
+                    float rms = AudioCapture::Rms(chunk.data(), chunk.size());
+                    float th = g_voiceVadThresh * 2.0f;
+                    if (rms > th) {
+                        stopSegActive = true;
+                        stopSpeechMs += chunkMs;
+                        stopSilMs = 0;
+                    } else if (stopSegActive) stopSilMs += chunkMs;
+                    if (stopSegActive) stopSeg.insert(stopSeg.end(), chunk.begin(), chunk.end());
+
+                    bool segDone = stopSegActive && (stopSilMs > 400 || stopSpeechMs > 2500);
+                    if (segDone) {
+                        if (stopSpeechMs >= 250) {
+                            std::string e2;
+                            std::string heard = SpeechToText::Transcribe(
+                                AudioCapture::MakeWav(stopSeg), g_whisperPort, WhisperLangCode(), e2);
+                            if (ContainsStopWord(heard)) interrupt = true;
+                        }
+                        stopSeg.clear();
+                        stopSegActive = false;
+                        stopSpeechMs = stopSilMs = 0;
+                    }
+                }
+            } else if (g_voiceFreeMode && sinceStart > 800) {
+                // Sem palavra definida: interrupcao por volume (antigo)
+                float bargeThresh = g_voiceVadThresh * 4.0f;
+                if (bargeThresh < 0.06f) bargeThresh = 0.06f;
+                if (cap.Level() > bargeThresh) {
+                    if (!bargeCounting) { bargeCounting = true; bargeStart = std::chrono::steady_clock::now(); }
+                    else if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - bargeStart).count() > 600)
+                        interrupt = true;
+                } else bargeCounting = false;
+            } else if (!g_voiceFreeMode && VoicePttHeld()) interrupt = true;
+            if (interrupt) { Tts::Instance().Stop(); break; }
+        }
+    }
+
+    Tts::Instance().Stop();
+    cap.Stop();
+    g_voiceState = 0;
+}
 
 static void DrawChatTab() {
     // --- Barra superior compacta: engrenagem (abre/fecha o painel lateral
@@ -1680,6 +2474,27 @@ static void DrawChatTab() {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", Localization::T("web_search_tooltip"));
     }
+
+    // Texto ditado pelo microfone chega de uma thread de transcricao;
+    // anexamos ao campo aqui, na thread da UI, para nao brigar com o ImGui.
+    {
+        std::lock_guard<std::mutex> lock(g_micMutex);
+        if (!g_pendingMicChat.empty()) {
+            size_t len = strlen(g_promptBuffer);
+            std::string add = (len > 0 ? " " : "") + g_pendingMicChat;
+            strncat(g_promptBuffer, add.c_str(), sizeof(g_promptBuffer) - len - 1);
+            g_pendingMicChat.clear();
+        }
+        if (!g_micError.empty()) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_micError.c_str());
+    }
+
+    bool micActiveChat = g_micRecordingTarget.load() == 1;
+    if (DrawMicButton("##micchat", micActiveChat)) ToggleMicRecording(1);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", g_micTranscribing.load() ? Localization::T("mic_transcribing")
+                                : micActiveChat ? Localization::T("mic_stop_tooltip")
+                                                : Localization::T("mic_start_tooltip"));
+    ImGui::SameLine();
     float promptW = ImGui::GetContentRegionAvail().x - 100;
     ImGui::SetNextItemWidth(promptW);
     ImGui::InputTextMultiline("##prompt", g_promptBuffer, sizeof(g_promptBuffer), ImVec2(promptW, 70));
@@ -1773,6 +2588,15 @@ static void DrawChatTab() {
 static void DrawSettingsTab() {
     ImGui::Text("%s", Localization::T("general_settings_title"));
     ImGui::Spacing();
+
+    {
+        if (ImGui::Checkbox(Localization::T("tray_minimize_option"), &g_minimizeToTray)) SaveConfigFromState();
+        if (ImGui::Checkbox(Localization::T("tray_close_option"), &g_closeToTray)) SaveConfigFromState();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", Localization::T("tray_hint"));
+        ImGui::PopTextWrapPos();
+        ImGui::Separator();
+    }
 
     bool dark = g_darkMode.load();
     if (ImGui::Checkbox(Localization::T("dark_mode"), &dark)) {
@@ -2364,6 +3188,21 @@ static void DrawAgentTab() {
 
     // --- Task input ---
     ImGui::Text("%s", Localization::T("agent_task_label"));
+    {
+        std::lock_guard<std::mutex> lock(g_micMutex);
+        if (!g_pendingMicAgent.empty()) {
+            if (!g_agentTaskBuffer.empty()) g_agentTaskBuffer += " ";
+            g_agentTaskBuffer += g_pendingMicAgent;
+            g_pendingMicAgent.clear();
+        }
+    }
+    bool micActiveAgent = g_micRecordingTarget.load() == 2;
+    if (DrawMicButton("##micagent", micActiveAgent)) ToggleMicRecording(2);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", g_micTranscribing.load() ? Localization::T("mic_transcribing")
+                                : micActiveAgent ? Localization::T("mic_stop_tooltip")
+                                                 : Localization::T("mic_start_tooltip"));
+    ImGui::SameLine();
     UiHelpers::InputTextMultilineUnlimited("##agenttask", &g_agentTaskBuffer, ImVec2(-1, 90));
 
     if (!g_agentPendingAttachFileName.empty() || g_agentExtractingPdf.load()) {
@@ -2429,6 +3268,480 @@ static void DrawAgentTab() {
     }
 
     ImGui::EndChild(); // AgentCenter
+}
+
+static void DrawVoiceTab() {
+    // --- Barra superior: engrenagem abre/fecha o painel de configuracoes ---
+    if (GearButton("\xE2\x9A\x99##voicegear")) g_voiceSidebarOpen = !g_voiceSidebarOpen;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Localization::T("settings"));
+    ImGui::SameLine();
+    ImGui::Text("%s", Localization::T("tab_voice"));
+    ImGui::Separator();
+
+    // --- Painel lateral esquerdo: downloads, servidores e ajustes ---
+    if (g_voiceSidebarOpen) {
+        ImGui::BeginChild("VoiceSidebar", ImVec2(430, -1), true);
+        ImGui::TextDisabled("%s", Localization::T("settings"));
+        ImGui::Separator();
+
+    // ---- Baixar um modelo Whisper direto pelo app ----
+    ImGui::TextWrapped("%s", Localization::T("voice_download_title"));
+    // Marca no proprio dropdown os modelos que JA ESTAO baixados em
+    // models\ — e para esses o botao vira "Usar" em vez de baixar de novo.
+    bool selectedExists = false;
+    {
+        std::vector<std::string> labels;
+        std::vector<const char*> labelPtrs;
+        for (auto& m : kWhisperModels) {
+            std::string label = std::string(m.file) + "  (" + m.size + ") - " + Localization::T(m.qualityKey);
+            if (std::filesystem::exists(std::string("models\\") + m.file))
+                label += std::string("  ") + Localization::T("voice_downloaded_suffix");
+            labels.push_back(label);
+        }
+        for (auto& l : labels) labelPtrs.push_back(l.c_str());
+        ImGui::SetNextItemWidth(-1);
+        ImGui::Combo("##whisperdlmodel", &g_whisperDlSelected, labelPtrs.data(), (int)labelPtrs.size());
+        selectedExists = std::filesystem::exists(std::string("models\\") + kWhisperModels[g_whisperDlSelected].file);
+    }
+
+    bool dlBusy = g_whisperDlState.inProgress.load();
+    if (!dlBusy) {
+        if (selectedExists) {
+            // Ja baixado: um clique aponta o campo para o arquivo local
+            if (ImGui::Button(Localization::T("voice_use_downloaded"), ImVec2(220, 0))) {
+                std::string dest = std::string("models\\") + kWhisperModels[g_whisperDlSelected].file;
+                strncpy(g_whisperModelPathBuffer, dest.c_str(), sizeof(g_whisperModelPathBuffer) - 1);
+                SaveConfigFromState();
+            }
+        } else if (ImGui::Button(Localization::T("voice_download_button"), ImVec2(220, 0))) {
+            g_whisperDlState.cancelRequested = false;
+            g_whisperDlState.errorMessage.clear();
+            int sel = g_whisperDlSelected;
+            std::thread([sel]() {
+                const auto& m = kWhisperModels[sel];
+                std::string dest = std::string("models\\") + m.file;
+                std::string token; // repo publico, token desnecessario
+                if (ModelDownloader::DownloadFile("ggerganov/whisper.cpp", m.file, dest, token, &g_whisperDlState)) {
+                    // Sucesso: ja aponta o campo para o arquivo baixado
+                    strncpy(g_whisperModelPathBuffer, dest.c_str(), sizeof(g_whisperModelPathBuffer) - 1);
+                    SaveConfigFromState();
+                }
+            }).detach();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button((std::string(Localization::T("browse")) + "##whisperbrowse2").c_str(), ImVec2(120, 0))) {
+            std::string picked = FilePicker::OpenGgufDialog("Select the Whisper model (ggml .bin / .gguf)");
+            if (!picked.empty()) {
+                strncpy(g_whisperModelPathBuffer, picked.c_str(), sizeof(g_whisperModelPathBuffer) - 1);
+                SaveConfigFromState();
+            }
+        }
+    } else {
+        float pct = (float)(g_whisperDlState.percent.load() / 100.0);
+        ImGui::ProgressBar(pct, ImVec2(-130, 0));
+        ImGui::SameLine();
+        if (ImGui::Button(Localization::T("cancel_button"), ImVec2(120, 0)))
+            g_whisperDlState.cancelRequested = true;
+    }
+    if (!g_whisperDlState.errorMessage.empty())
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_whisperDlState.errorMessage.c_str());
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", Localization::T("voice_download_hint"));
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    // ---- Configuracao do whisper (transcricao) ----
+    ImGui::TextWrapped("%s", Localization::T("voice_whisper_model_label"));
+    ImGui::SetNextItemWidth(-75);
+    if (ImGui::InputText("##whispermodel", g_whisperModelPathBuffer, sizeof(g_whisperModelPathBuffer)))
+        SaveConfigFromState();
+    ImGui::SameLine();
+    if (ImGui::Button((std::string(Localization::T("browse")) + "##whisperbrowse").c_str())) {
+        std::string picked = FilePicker::OpenGgufDialog("Select the Whisper model (ggml .bin / .gguf)");
+        if (!picked.empty()) {
+            strncpy(g_whisperModelPathBuffer, picked.c_str(), sizeof(g_whisperModelPathBuffer) - 1);
+            SaveConfigFromState();
+        }
+    }
+
+    DrawServerStatusDot(g_whisperRunning.load(), g_whisperReady.load(), &g_whisperServer);
+    if (!g_whisperRunning.load()) {
+        if (ImGui::Button(Localization::T("voice_start_whisper"), ImVec2(220, 0))) {
+            if (strlen(g_whisperModelPathBuffer) > 0 &&
+                g_whisperServer.StartWhisper(g_whisperModelPathBuffer, g_whisperPort)) {
+                g_whisperRunning = true;
+                g_whisperReady = false;
+                std::thread(PollWhisperReady).detach();
+            }
+        }
+    } else {
+        if (ImGui::Button(Localization::T("voice_stop_whisper"), ImVec2(220, 0))) {
+            g_voiceModeActive = false;
+            g_whisperServer.Stop();
+            g_whisperRunning = false;
+            g_whisperReady = false;
+        }
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", Localization::T("voice_whisper_hint"));
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    // ---- Modelo LLM da conversa (dedicado da aba Voz) ----
+    ImGui::TextWrapped("%s", Localization::T("voice_llm_label"));
+    ImGui::SetNextItemWidth(-75);
+    if (ImGui::InputText("##voicellmmodel", g_voiceModelPathBuffer, sizeof(g_voiceModelPathBuffer)))
+        SaveConfigFromState();
+    ImGui::SameLine();
+    if (ImGui::Button((std::string(Localization::T("browse")) + "##voicellmbrowse").c_str())) {
+        std::string picked = FilePicker::OpenGgufDialog("Select the LLM .gguf for Voice");
+        if (!picked.empty()) {
+            strncpy(g_voiceModelPathBuffer, picked.c_str(), sizeof(g_voiceModelPathBuffer) - 1);
+            SaveConfigFromState();
+        }
+    }
+    DrawServerStatusDot(g_voiceLlmRunning.load(), g_voiceLlmReady.load(), &g_voiceLlmServer);
+    if (!g_voiceLlmRunning.load()) {
+        if (ImGui::Button(Localization::T("start_server"), ImVec2(220, 0))) {
+            if (strlen(g_voiceModelPathBuffer) > 0 &&
+                g_voiceLlmServer.Start(g_voiceModelPathBuffer, g_voiceLlmPort, g_sampling.ctxSize,
+                                        999, "", g_extraServerArgs)) {
+                g_voiceLlmRunning = true;
+                g_voiceLlmReady = false;
+                std::thread(PollServerReady, g_voiceLlmPort, &g_voiceLlmRunning, &g_voiceLlmReady, &g_voiceLlmServer).detach();
+            }
+        }
+    } else {
+        if (ImGui::Button(Localization::T("stop_server"), ImVec2(220, 0))) {
+            g_voiceLlmServer.Stop();
+            g_voiceLlmRunning = false;
+            g_voiceLlmReady = false;
+        }
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", Localization::T("voice_llm_hint"));
+    ImGui::PopTextWrapPos();
+
+    {
+        bool ws = g_voiceWebSearchEnabled.load();
+        if (ImGui::Checkbox((std::string(Localization::T("web_search_checkbox")) + "##voice").c_str(), &ws)) {
+            g_voiceWebSearchEnabled = ws;
+            SaveConfigFromState();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", Localization::T("voice_web_search_tooltip"));
+    }
+
+    bool voiceThinking = g_voiceThinkingEnabled.load();
+    if (ImGui::Checkbox(Localization::T("thinking_mode"), &voiceThinking)) {
+        g_voiceThinkingEnabled = voiceThinking;
+        SaveConfigFromState();
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", Localization::T("voice_thinking_hint"));
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    // ---- Dispositivos de audio ----
+    {
+        // Cache das listas (enumerar todo frame seria caro); botao atualiza.
+        static std::vector<std::string> s_inDevs = AudioCapture::ListInputDevices();
+        static std::vector<std::string> s_outDevs = Tts::ListOutputDevices();
+        static std::vector<std::string>* s_voicesPtr = nullptr; // definido abaixo
+        if (ImGui::SmallButton(Localization::T("voice_devices_refresh"))) {
+            s_inDevs = AudioCapture::ListInputDevices();
+            s_outDevs = Tts::ListOutputDevices();
+            if (s_voicesPtr) *s_voicesPtr = Tts::ListVoices();
+        }
+
+        auto deviceCombo = [](const char* id, const std::vector<std::string>& devs, int& sel) -> bool {
+            std::vector<std::string> labels;
+            labels.push_back(Localization::T("voice_device_default"));
+            for (auto& d : devs) labels.push_back(d);
+            std::vector<const char*> ptrs;
+            for (auto& l : labels) ptrs.push_back(l.c_str());
+            int idx = sel + 1;
+            if (idx < 0 || idx >= (int)ptrs.size()) idx = 0;
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::Combo(id, &idx, ptrs.data(), (int)ptrs.size())) {
+                sel = idx - 1;
+                return true;
+            }
+            return false;
+        };
+
+        ImGui::TextWrapped("%s", Localization::T("voice_input_device_label"));
+        if (deviceCombo("##voiceindev", s_inDevs, g_voiceInputDevice)) {
+            AudioCapture::Instance().SetDeviceId(g_voiceInputDevice);
+            SaveConfigFromState();
+        }
+        ImGui::TextWrapped("%s", Localization::T("voice_output_device_label"));
+        if (deviceCombo("##voiceoutdev", s_outDevs, g_voiceOutputDevice)) {
+            Tts::Instance().SetOutputDevice(g_voiceOutputDevice);
+            SaveConfigFromState();
+        }
+
+        static std::vector<std::string> s_voices = Tts::ListVoices();
+        s_voicesPtr = &s_voices;
+        ImGui::TextWrapped("%s", Localization::T("voice_tts_voice_label"));
+        if (deviceCombo("##ttsvoice", s_voices, g_voiceTtsVoice)) {
+            Tts::Instance().SetVoiceIndex(g_voiceTtsVoice);
+            SaveConfigFromState();
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", Localization::T("voice_tts_voice_hint"));
+        ImGui::PopTextWrapPos();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", Localization::T("voice_devices_hint"));
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::Separator();
+
+    // ---- Ajustes do modo livre: sensibilidade + tempo de silencio ----
+    // Medidor ao vivo: mostra o nivel atual do microfone e onde esta o
+    // limiar — assim da para calibrar ate a barra passar da marca quando
+    // voce fala e ficar abaixo quando o ambiente esta em silencio.
+    {
+        float level = AudioCapture::Instance().Level();
+        ImGui::Text("%s", Localization::T("voice_mic_level_label"));
+        ImVec2 barPos = ImGui::GetCursorScreenPos();
+        float barW = ImGui::GetContentRegionAvail().x;
+        ImGui::ProgressBar(level / 0.15f > 1.0f ? 1.0f : level / 0.15f, ImVec2(barW, 14), "");
+        // marca do limiar sobre a barra
+        float mark = (g_voiceVadThresh / 0.15f) * barW;
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(barPos.x + mark, barPos.y - 2),
+                                            ImVec2(barPos.x + mark, barPos.y + 16),
+                                            IM_COL32(255, 80, 80, 255), 2.0f);
+        // Rotulos em cima e slider em largura total: com o rotulo ao lado
+        // (padrao do ImGui) o texto era cortado na borda do painel.
+        ImGui::TextWrapped("%s", Localization::T("voice_vad_thresh_label"));
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##vadthresh", &g_voiceVadThresh,
+                               0.004f, 0.08f, "%.3f")) SaveConfigFromState();
+        ImGui::TextWrapped("%s", Localization::T("voice_silence_label"));
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderInt("##silencems", &g_voiceSilenceMs,
+                             200, 2500, "%d ms")) SaveConfigFromState();
+    }
+    ImGui::Separator();
+
+    // ---- Pasta de trabalho (arquivos por voz) ----
+    ImGui::TextWrapped("%s", Localization::T("voice_folder_label"));
+    if (g_voiceFolder.empty()) ImGui::TextDisabled("%s", Localization::T("no_folder_selected"));
+    else ImGui::TextWrapped("%s", g_voiceFolder.c_str());
+    if (ImGui::Button((std::string(Localization::T("choose_folder")) + "##voicefolder").c_str())) {
+        std::string folder = FolderPicker::OpenFolderDialog();
+        if (!folder.empty()) { g_voiceFolder = folder; SaveConfigFromState(); }
+    }
+    if (!g_voiceFolder.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(Localization::T("voice_folder_clear"))) {
+            g_voiceFolder.clear();
+            SaveConfigFromState();
+        }
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", Localization::T("voice_folder_hint"));
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    // ---- Palavra de ativacao ----
+    if (ImGui::Checkbox(Localization::T("voice_wake_checkbox"), &g_voiceWakeEnabled)) SaveConfigFromState();
+    if (g_voiceWakeEnabled) {
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::InputText("##wakeword", g_voiceWakeWordBuffer, sizeof(g_voiceWakeWordBuffer)))
+            SaveConfigFromState();
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", Localization::T("voice_wake_hint"));
+    ImGui::PopTextWrapPos();
+
+    ImGui::TextWrapped("%s", Localization::T("voice_stop_word_label"));
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::InputText("##stopword", g_voiceStopWordBuffer, sizeof(g_voiceStopWordBuffer)))
+        SaveConfigFromState();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", Localization::T("voice_stop_word_hint"));
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    // ---- Modo: livre (VAD) ou apertar para falar ----
+    bool free = g_voiceFreeMode;
+    if (ImGui::RadioButton(Localization::T("voice_mode_free"), free)) { g_voiceFreeMode = true; SaveConfigFromState(); }
+    if (ImGui::RadioButton(Localization::T("voice_mode_ptt"), !free)) { g_voiceFreeMode = false; SaveConfigFromState(); }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", g_voiceFreeMode ? Localization::T("voice_mode_free_hint")
+                                              : Localization::T("voice_mode_ptt_hint"));
+    ImGui::PopTextWrapPos();
+
+    {
+        // Tecla global de "apertar para falar" (funciona minimizado).
+        // Sempre visivel para ser facil de achar, mesmo no modo livre.
+        ImGui::Text("%s %s", Localization::T("voice_hotkey_label"), VoiceHotkeyName().c_str());
+        ImGui::SameLine();
+        if (!g_voiceCapturingHotkey) {
+            if (ImGui::SmallButton(Localization::T("voice_hotkey_set"))) g_voiceCapturingHotkey = true;
+        } else {
+            ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "%s", Localization::T("voice_hotkey_press"));
+            // Varre o teclado: primeira tecla NAO-modificadora pressionada
+            // vira a tecla; Shift/Ctrl/Alt pressionados no momento viram
+            // os modificadores. Esc cancela.
+            if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
+                g_voiceCapturingHotkey = false;
+            } else {
+                for (int vk = 0x08; vk <= 0xFE; vk++) {
+                    if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
+                        vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LCONTROL ||
+                        vk == VK_RCONTROL || vk == VK_LMENU || vk == VK_RMENU ||
+                        vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON ||
+                        vk == VK_ESCAPE) continue;
+                    if (GetAsyncKeyState(vk) & 0x8000) {
+                        g_voicePttVk = vk;
+                        g_voicePttMods = 0;
+                        if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) g_voicePttMods |= 1;
+                        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) g_voicePttMods |= 2;
+                        if (GetAsyncKeyState(VK_MENU)    & 0x8000) g_voicePttMods |= 4;
+                        g_voiceCapturingHotkey = false;
+                        SaveConfigFromState();
+                        break;
+                    }
+                }
+            }
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", Localization::T("voice_hotkey_hint"));
+        ImGui::PopTextWrapPos();
+    }
+
+        ImGui::EndChild(); // VoiceSidebar
+        ImGui::SameLine();
+    }
+
+    // --- Area central: conversa (animacao, transcricao, botoes) ---
+    ImGui::BeginChild("VoiceCenter", ImVec2(-1, -1), false);
+
+    // ---- Liga/desliga a conversa ----
+    bool llmReady = (g_voiceLlmRunning.load() && g_voiceLlmReady.load()) ||
+                    (g_serverRunning.load() && g_serverReady.load());
+    bool canStart = llmReady && g_whisperReady.load();
+    if (!g_voiceModeActive.load()) {
+        ImGui::BeginDisabled(!canStart);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.13f, 0.55f, 0.28f, 1.0f));
+        if (ImGui::Button(Localization::T("voice_start_button"), ImVec2(260, 44))) {
+            {
+                std::lock_guard<std::mutex> lock(g_voiceMutex);
+                g_voiceHistory.clear();
+                g_voiceStatusMsg.clear();
+            }
+            g_voiceModeActive = true;
+            std::thread(VoiceWorker).detach();
+        }
+        ImGui::PopStyleColor();
+        ImGui::EndDisabled();
+        if (!canStart) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(ImVec4(1, 0.7f, 0.3f, 1), "%s", Localization::T("voice_prereq_hint"));
+            ImGui::PopTextWrapPos();
+        }
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.18f, 0.18f, 1.0f));
+        if (ImGui::Button(Localization::T("voice_stop_button"), ImVec2(260, 44))) {
+            g_voiceModeActive = false;
+        }
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button(g_voiceShowTranscript ? Localization::T("voice_hide_transcript")
+                                            : Localization::T("voice_show_transcript"), ImVec2(230, 44))) {
+        g_voiceShowTranscript = !g_voiceShowTranscript;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_voiceMutex);
+        if (!g_voiceStatusMsg.empty())
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_voiceStatusMsg.c_str());
+    }
+
+    // ---- Transcricao da conversa (opcional) ----
+    if (g_voiceShowTranscript) {
+        ImGui::BeginChild("VoiceTranscript", ImVec2(-1, 200), true);
+        std::lock_guard<std::mutex> lock(g_voiceMutex);
+        float w = ImGui::GetContentRegionAvail().x - 4.0f;
+        for (auto& t : g_voiceHistory) {
+            bool user = t.role == "user";
+            ImGui::TextColored(user ? ImVec4(0.5f, 0.8f, 1.0f, 1) : ImVec4(0.6f, 1.0f, 0.6f, 1),
+                               "%s", user ? Localization::T("you_label") : Localization::T("assistant_label"));
+            ImGui::PushTextWrapPos(w);
+            ImGui::TextUnformatted(t.content.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+        }
+        if (g_voiceModeActive.load()) ImGui::SetScrollHereY(1.0f);
+        ImGui::EndChild();
+    }
+
+    // ---- Animacao central de som ----
+    // Circulo que pulsa: com o nivel real do microfone enquanto ouve, e
+    // com uma onda sintetica enquanto o modelo fala. Nenhum texto da
+    // conversa e exibido — de proposito.
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImVec2 center(origin.x + avail.x * 0.5f, origin.y + avail.y * 0.55f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    int state = g_voiceState.load();
+    float t = (float)ImGui::GetTime();
+    float base = 46.0f;
+    float level = AudioCapture::Instance().Level();
+
+    ImU32 color;
+    float r = base;
+    const char* label;
+    switch (state) {
+        case 1: // ouvindo: pulsa com a voz do usuario
+            color = IM_COL32(70, 160, 255, 255);
+            r = base + level * 420.0f;
+            label = Localization::T("voice_state_listening");
+            break;
+        case 2: // pensando: "respiracao" lenta
+            color = IM_COL32(250, 190, 60, 255);
+            r = base + 8.0f * (0.5f + 0.5f * sinf(t * 2.2f));
+            label = Localization::T("voice_state_thinking");
+            break;
+        case 3: // falando: onda sintetica animada
+            color = IM_COL32(80, 210, 120, 255);
+            r = base + 12.0f * (0.5f + 0.5f * sinf(t * 7.0f)) + 7.0f * (0.5f + 0.5f * sinf(t * 13.7f));
+            label = Localization::T("voice_state_speaking");
+            break;
+        default:
+            color = IM_COL32(120, 120, 130, 255);
+            label = Localization::T("voice_state_idle");
+            break;
+    }
+    if (r > base) {
+        // aneis externos suaves
+        dl->AddCircle(center, r + 18.0f, (color & 0x00FFFFFF) | 0x30000000, 48, 3.0f);
+        dl->AddCircle(center, r + 34.0f, (color & 0x00FFFFFF) | 0x18000000, 48, 2.0f);
+    }
+    dl->AddCircleFilled(center, r, color, 48);
+    ImVec2 ts = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(center.x - ts.x * 0.5f, center.y + r + 24.0f), IM_COL32(200, 200, 210, 255), label);
+
+    // ---- Botao "segurar para falar" (modo apertar) ----
+    if (g_voiceModeActive.load() && !g_voiceFreeMode) {
+        ImGui::SetCursorScreenPos(ImVec2(center.x - 110.0f, origin.y + avail.y - 64.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.80f, 0.15f, 0.15f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.22f, 0.22f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.60f, 0.10f, 0.10f, 1.0f));
+        ImGui::Button(Localization::T("voice_ptt_button"), ImVec2(220, 48));
+        // "segurar": ativo enquanto o mouse estiver pressionado no botao
+        g_voicePttHeld = ImGui::IsItemActive();
+        ImGui::PopStyleColor(3);
+    } else {
+        g_voicePttHeld = false;
+    }
+    ImGui::Dummy(avail); // reserva a area da animacao
+    ImGui::EndChild(); // VoiceCenter
 }
 
 static void DrawHistoryTab() {
@@ -2807,6 +4120,21 @@ int main() {
         }
     }
 
+    // ---------- Instancia unica ----------
+    // Com a janela escondida na bandeja, clicar no icone fixado da barra
+    // de tarefas iniciava um SEGUNDO processo do zero. Agora a segunda
+    // instancia detecta a primeira (mutex nomeado), manda uma mensagem
+    // "mostre-se" para a janela dela e encerra imediatamente — clicar no
+    // atalho passa a restaurar o processo que ja esta rodando.
+    HANDLE hSingle = CreateMutexW(nullptr, TRUE, L"DuckFaceLLM_SingleInstanceMutex");
+    if (hSingle && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = FindWindowA(nullptr, "DuckFaceLLM 2.2.0");
+        if (existing) {
+            PostMessageA(existing, RegisterWindowMessageA("DuckFaceLLM_ShowMe"), 0, 0);
+        }
+        return 0;
+    }
+
     auto& cfg = ConfigManager::Instance();
     cfg.Load();
 
@@ -2816,6 +4144,29 @@ int main() {
     g_thinkingEnabled = cfg.thinkingEnabled;
     g_webSearchEnabled = cfg.webSearchEnabled;
     g_agentWebSearchEnabled = cfg.agentWebSearchEnabled;
+    strncpy(g_whisperModelPathBuffer, cfg.whisperModelPath.c_str(), sizeof(g_whisperModelPathBuffer) - 1);
+    g_whisperPort = cfg.whisperPort;
+    g_voiceFreeMode = cfg.voiceFreeMode;
+    strncpy(g_voiceModelPathBuffer, cfg.voiceModelPath.c_str(), sizeof(g_voiceModelPathBuffer) - 1);
+    g_voiceLlmPort = cfg.voiceLlmPort;
+    g_voiceVadThresh = cfg.voiceVadThresh;
+    g_voiceSilenceMs = cfg.voiceSilenceMs;
+    g_voicePttVk = cfg.voicePttVk;
+    g_voicePttMods = cfg.voicePttMods;
+    g_voiceFolder = cfg.voiceFolder;
+    g_voiceWakeEnabled = cfg.voiceWakeEnabled;
+    strncpy(g_voiceWakeWordBuffer, cfg.voiceWakeWord.c_str(), sizeof(g_voiceWakeWordBuffer) - 1);
+    g_minimizeToTray = cfg.minimizeToTray;
+    g_closeToTray = cfg.closeToTray;
+    g_voiceInputDevice = cfg.voiceInputDevice;
+    g_voiceOutputDevice = cfg.voiceOutputDevice;
+    g_voiceThinkingEnabled = cfg.voiceThinkingEnabled;
+    strncpy(g_voiceStopWordBuffer, cfg.voiceStopWord.c_str(), sizeof(g_voiceStopWordBuffer) - 1);
+    g_voiceWebSearchEnabled = cfg.voiceWebSearchEnabled;
+    g_voiceTtsVoice = cfg.voiceTtsVoice;
+    if (g_voiceTtsVoice >= 0) Tts::Instance().SetVoiceIndex(g_voiceTtsVoice);
+    AudioCapture::Instance().SetDeviceId(g_voiceInputDevice);
+    if (g_voiceOutputDevice >= 0) Tts::Instance().SetOutputDevice(g_voiceOutputDevice);
     g_port = cfg.serverPort;
     g_sampling = cfg.sampling;
     strncpy(g_agentModelPathBuffer, cfg.agentModelPath.c_str(), sizeof(g_agentModelPathBuffer) - 1);
@@ -2843,7 +4194,12 @@ int main() {
     if (!glfwInit()) return 1;
 
     const char* glsl_version = "#version 130";
-    GLFWwindow* window = glfwCreateWindow(1280, 880, "DuckFaceLLM 2.0.0", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 880, "DuckFaceLLM 2.2.0", nullptr, nullptr);
+    // Subclasse do WndProc nativo: intercepta o "minimizar" (para a
+    // bandeja, se ativado) e as mensagens do icone da bandeja.
+    g_glfwWindow = window;
+    g_hwnd = glfwGetWin32Window(window);
+    g_originalWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)TrayWndProc);
     if (!window) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
@@ -2926,7 +4282,16 @@ int main() {
     RefreshConversationList();
     RefreshAgentConversationList();
 
-    while (!glfwWindowShouldClose(window)) {
+    while (true) {
+        if (glfwWindowShouldClose(window)) {
+            // "Fechar para a bandeja": o X esconde a janela e o app segue
+            // rodando (servidores, voz e tecla global continuam ativos).
+            // Sair de verdade: menu da bandeja -> Sair.
+            if (g_closeToTray && !g_reallyQuit) {
+                glfwSetWindowShouldClose(window, GLFW_FALSE);
+                TrayHideWindow();
+            } else break;
+        }
         // Quando ha trabalho em background (geracao, download, agente,
         // servidor carregando), renderizamos continuamente para o texto
         // fluir em tempo real. Parado, esperamos eventos com timeout — o
@@ -2936,9 +4301,15 @@ int main() {
                     g_agentExtractingPdf.load() || g_fetchingFiles.load() ||
                     (g_serverRunning.load() && !g_serverReady.load()) ||
                     (g_agentServerRunning.load() && !g_agentServerReady.load()) ||
-                    (g_reviewerServerRunning.load() && !g_reviewerServerReady.load());
+                    (g_reviewerServerRunning.load() && !g_reviewerServerReady.load()) ||
+                    g_voiceModeActive.load() || g_micRecordingTarget.load() != 0 ||
+                    g_micTranscribing.load() ||
+                    (g_whisperRunning.load() && !g_whisperReady.load()) ||
+                    g_whisperDlState.inProgress.load();
         for (auto& d : g_debaters)
             if (d->running.load() && !d->ready.load()) { busy = true; break; }
+        bool hidden = g_hwnd && !IsWindowVisible(g_hwnd);
+        if (hidden && !busy) { glfwWaitEventsTimeout(0.25); continue; } // escondido: nem renderiza
         if (busy) glfwPollEvents();
         else glfwWaitEventsTimeout(0.10); // acorda a cada 100ms de qualquer forma
 
@@ -2963,9 +4334,12 @@ int main() {
             if (g_agentServerRunning.load()) activeCount++;
             if (g_reviewerServerRunning.load()) activeCount++;
             for (auto& d : g_debaters) if (d->running.load()) activeCount++;
+            if (g_whisperRunning.load()) activeCount++;
+            if (g_voiceLlmRunning.load()) activeCount++;
 
             ImGui::BeginDisabled(activeCount == 0);
             if (ImGui::SmallButton(Localization::T("stop_all_servers"))) {
+                StopVoiceSystems();
                 StopAllServers();
             }
             ImGui::EndDisabled();
@@ -3005,6 +4379,10 @@ int main() {
             }
             if (ImGui::BeginTabItem(Localization::T("tab_agent"))) {
                 DrawAgentTab();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem(Localization::T("tab_voice"))) {
+                DrawVoiceTab();
                 ImGui::EndTabItem();
             }
             // History e Projects sao ambos "listas de conversas salvas",
@@ -3054,6 +4432,8 @@ int main() {
 
     g_agentStopRequested = true;
     g_agentApprovalDecision = 2;
+    TrayRemoveIcon();
+    StopVoiceSystems();
     if (g_serverRunning.load()) g_server.Stop();
     if (g_agentServerRunning.load()) g_agentServer.Stop();
     if (g_reviewerServerRunning.load()) g_reviewerServer.Stop();

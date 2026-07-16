@@ -38,6 +38,48 @@ server. Features:
   anything outside it. Choose between always asking for your approval
   before each file change, or letting it work freely without asking (still
   confined to the folder either way);
+- **Web search (RAG)**: optional per-message DuckDuckGo search — the app
+  fetches the top results, extracts the page text and injects it as
+  ephemeral context so the model can answer with up-to-date information,
+  citing the source URLs. Also available for Agent tasks;
+- **Voice mode (fully local)**: speech-to-text through a managed
+  `whisper-server.exe` (whisper.cpp) process, text-to-speech through the
+  Windows SAPI engine, and a dedicated conversation loop with:
+  - **free mode** — energy-based VAD detects when you start/stop speaking
+    (configurable silence timeout and mic sensitivity threshold) and
+    answers out loud, with **barge-in**: speaking over the answer
+    interrupts generation/speech and returns to listening;
+  - **push-to-talk** — records only while a button or a **global,
+    user-configurable hotkey** (single keys or combos like `Shift+G`,
+    polled via `GetAsyncKeyState`, working even minimized) is held;
+  - an optional **wake word**: in free mode, transcriptions that don't
+    contain the chosen name are ignored (accent/case-insensitive match);
+  - a **sandboxed working folder**: the model can create, append, read,
+    delete and list files strictly inside a chosen folder through an
+    inline command protocol, reusing the Agent's path-escape protection;
+  - a speech sanitizer that strips code blocks/markdown before synthesis,
+    and selectable audio **input (waveIn) and output (SAPI) devices**;
+- **Microphone dictation** in the Chat and Agent tabs: recorded audio is
+  transcribed by the same Whisper server and appended to the message box;
+- **In-app Whisper model catalog**: curated multilingual ggml models
+  (tiny → large-v3-turbo) downloadable directly from the official
+  `ggerganov/whisper.cpp` Hugging Face repository, with file sizes shown;
+- **Resumable downloads**: model downloads use HTTP Range requests to
+  resume interrupted transfers from the existing `.part` file, plus
+  dead-connection (low-speed) detection;
+- **Per-server log files**: each `llama-server`/`whisper-server` instance
+  has stdout/stderr redirected to `logs\<name>-<port>.log`, and crashed
+  server processes are detected and reported instead of hanging on
+  "loading";
+- **System tray integration** (optional): minimizing and/or closing hides
+  the window to the notification area while everything (servers, voice
+  conversation, global hotkey) keeps running;
+- **Encrypted Hugging Face token**: stored via Windows **DPAPI** (bound to
+  your Windows account) instead of plain text, with automatic migration of
+  older plain-text configs;
+- **Editable templates**: besides adding/deleting, any template — including
+  built-ins — can be edited (editing a built-in creates an editable copy
+  and hides the original, restorable at any time);
 - Runs as a **pure GUI app on Windows** — no console/terminal window opens
   alongside it;
 
@@ -52,6 +94,7 @@ server. Features:
 | [vcpkg](https://github.com/microsoft/vcpkg) | C++ dependency manager |
 | [Ninja](https://github.com/ninja-build/ninja/releases) | Build tool used by vcpkg (install manually if vcpkg can't auto-download it) |
 | `llama-server.exe` from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) | Inference engine |
+| `whisper-server.exe` from [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases) (optional) | Speech-to-text engine for the voice features |
 
 ---
 
@@ -112,7 +155,7 @@ source.
 build.bat
 ```
 
-Output: `build\Release\DFFastLLM.exe`.
+Output: `build\Release\DuckFaceLLM.exe`.
 
 To test locally before packaging the installer, copy `bin\llama-server.exe`
 (and any DLLs) into `build\Release\bin\`.
@@ -253,6 +296,41 @@ at the top of the tab to bring all of them back at once. When more than one
 template's keywords match a prompt, the one with the most matching keywords
 wins.
 
+### The Voice tab
+A fully local voice conversation mode: you talk, the model answers out
+loud, and no text is shown unless you ask for the transcript.
+
+1. Download a Whisper model from the built-in catalog (all listed models
+   are multilingual) or point to one you already have, and place
+   `whisper-server.exe` (from the whisper.cpp releases) in `bin\`.
+2. Start the Whisper server and an LLM server — the Voice tab has its own
+   dedicated LLM server slot, or it falls back to the Chat tab's server.
+3. Pick a mode:
+   - **Free mode**: voice-activity detection starts/stops the recording
+     automatically. Both the microphone sensitivity threshold (with a live
+     level meter) and the silence timeout that triggers the answer are
+     configurable. Speaking over the model's answer interrupts it
+     (barge-in) and the app goes back to listening.
+   - **Push-to-talk**: hold the on-screen button or a global hotkey of
+     your choice (combos like `Shift+G` supported). The hotkey is polled
+     system-wide, so it keeps working with the window minimized or hidden
+     in the tray. Nothing is recorded while the key isn't held.
+4. Optional extras:
+   - **Wake word**: only respond when called by a chosen name
+     (accent-insensitive); other speech is ignored.
+   - **Working folder**: the model can create/append/read/delete/list
+     files inside one chosen folder — and nowhere else — via an inline
+     command protocol executed under the same sandbox as the Agent. Ask
+     things like "create a note called groceries with milk and bread".
+   - **Audio devices**: choose the capture (microphone) and playback
+     (speakers) devices; using a headset prevents the model from hearing
+     its own voice in free mode.
+
+Answers are sanitized before synthesis (code blocks and markdown are
+stripped) and the voice system prompt asks for short, natural, speakable
+replies. The conversation is kept in memory only; a transcript view is
+available on demand.
+
 ---
 
 ## Technical notes
@@ -268,8 +346,17 @@ wins.
   the app can't run. If you want to convert a model yourself, use llama.cpp's
   `convert_hf_to_gguf.py` script separately, then place the resulting
   `.gguf` in the `models\` folder.
-- **Hugging Face token** is saved in plain text in `config.json` next to the
-  executable. It is not encrypted — treat that file as sensitive.
+- **Hugging Face token** is encrypted with the Windows **DPAPI** and stored
+  as `hf_token_enc` in `config.json`; only the same Windows account on the
+  same machine can decrypt it. Old plain-text configs are migrated
+  automatically on the next save.
+- **Voice pipeline is 100% local.** Speech recognition runs in a managed
+  `whisper-server.exe` process (whisper.cpp) on `127.0.0.1`, synthesis uses
+  the Windows SAPI voices installed on the system, and audio capture uses
+  the waveIn API at 16 kHz mono PCM. Nothing is sent to any cloud service.
+- **VAD is energy-based** (RMS threshold + silence timer), not a neural
+  VAD — in noisy environments prefer push-to-talk, and use a headset to
+  avoid the speaker output re-triggering the microphone during answers.
 - **GPU offload**: `LlamaServerManager.cpp` passes `-ngl 999` to push as many
   layers as possible onto the GPU. Ignored automatically on CPU-only builds.
 

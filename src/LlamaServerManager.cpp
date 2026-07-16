@@ -4,6 +4,26 @@
 #include <iostream>
 #include <filesystem>
 
+// Job Object com KILL_ON_JOB_CLOSE: todo servidor filho e associado a
+// este job, entao se o app morrer de QUALQUER jeito (crash, "Finalizar
+// tarefa" no Gerenciador, queda de energia do processo), o Windows mata
+// os llama-server/whisper-server automaticamente. Sem isso, um app
+// finalizado a forca deixava servidores ORFAOS segurando as portas
+// 8080/8090/8095 — e nenhuma tentativa nova de iniciar funcionava mais
+// ("porta em uso" instantaneo) ate matar os orfaos na mao.
+static HANDLE GetKillOnCloseJob() {
+    static HANDLE job = []() {
+        HANDLE j = CreateJobObjectW(nullptr, nullptr);
+        if (j) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(j, JobObjectExtendedLimitInformation, &info, sizeof(info));
+        }
+        return j;
+    }();
+    return job;
+}
+
 LlamaServerManager::~LlamaServerManager() {
     if (m_running) Stop();
 }
@@ -81,6 +101,55 @@ bool LlamaServerManager::Start(const std::string& modelPath, int port, int ctxSi
         std::cerr << "Failed to start llama-server.exe (error " << GetLastError() << ")" << std::endl;
         return false;
     }
+    if (GetKillOnCloseJob()) AssignProcessToJobObject(GetKillOnCloseJob(), m_procInfo.hProcess);
+    m_running = true;
+    return true;
+}
+
+// Fatora o lancamento de processo com redirecionamento de log, usado por
+// Start (llama-server) e StartWhisper (whisper-server).
+static bool LaunchWithLog(const std::string& cmdStr, const std::string& logPath,
+                           PROCESS_INFORMATION& procInfo) {
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+
+    try { std::filesystem::create_directories("logs"); } catch (...) {}
+    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+    HANDLE hLog = CreateFileA(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hLog != INVALID_HANDLE_VALUE) {
+        si.hStdOutput = hLog;
+        si.hStdError  = hLog;
+        si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    } else {
+        si.dwFlags &= ~STARTF_USESTDHANDLES;
+    }
+
+    ZeroMemory(&procInfo, sizeof(procInfo));
+    std::vector<char> cmdBuf(cmdStr.begin(), cmdStr.end());
+    cmdBuf.push_back('\0');
+    BOOL ok = CreateProcessA(
+        nullptr, cmdBuf.data(), nullptr, nullptr,
+        (si.dwFlags & STARTF_USESTDHANDLES) ? TRUE : FALSE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &si, &procInfo
+    );
+    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
+    if (!ok) std::cerr << "Failed to start process (error " << GetLastError() << ")" << std::endl;
+    if (ok && GetKillOnCloseJob()) AssignProcessToJobObject(GetKillOnCloseJob(), procInfo.hProcess);
+    return ok == TRUE;
+}
+
+bool LlamaServerManager::StartWhisper(const std::string& modelPath, int port) {
+    if (m_running) Stop();
+    std::ostringstream cmd;
+    cmd << "bin\\whisper-server.exe"
+        << " -m \"" << modelPath << "\""
+        << " --port " << port
+        << " --host 127.0.0.1";
+    m_logPath = "logs\\whisper-server-" + std::to_string(port) + ".log";
+    if (!LaunchWithLog(cmd.str(), m_logPath, m_procInfo)) return false;
     m_running = true;
     return true;
 }

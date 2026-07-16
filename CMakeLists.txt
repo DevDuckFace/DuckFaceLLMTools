@@ -46,7 +46,7 @@ target_link_libraries(DuckFaceLLM PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(DuckFaceLLM PRIVATE opengl32 crypt32 shell32) # crypt32: DPAPI (token HF) | shell32: ShellExecuteA (abrir log)
+    target_link_libraries(DuckFaceLLM PRIVATE opengl32 crypt32 shell32 winmm ole32 sapi.lib) # crypt32: DPAPI (token HF) | shell32: ShellExecuteA (abrir log)
     # Garante que o entry point continue sendo main() (nao WinMain), mesmo
     # com o subsystem WINDOWS ativo via WIN32 acima.
     set_target_properties(DuckFaceLLM PROPERTIES LINK_FLAGS "/ENTRY:mainCRTStartup")
